@@ -1,12 +1,28 @@
 param(
     [Parameter(Mandatory = $false)]
-    [string]$DllPath = "$(Join-Path $PSScriptRoot '..\src\WordGeminiFormula.AddIn\bin\Release\net48\WordGeminiFormula.AddIn.dll')"
+    [string]$DllPath
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ([string]::IsNullOrWhiteSpace($DllPath)) {
+    $packagedDll = Join-Path $PSScriptRoot 'WordGeminiFormula.AddIn.dll'
+    $sourceDll = Join-Path $PSScriptRoot '..\src\WordGeminiFormula.AddIn\bin\Release\net48\WordGeminiFormula.AddIn.dll'
+
+    if (Test-Path $packagedDll) {
+        $DllPath = $packagedDll
+    }
+    elseif (Test-Path $sourceDll) {
+        $DllPath = $sourceDll
+    }
+    else {
+        throw "Không tìm thấy WordGeminiFormula.AddIn.dll. Nếu bạn dùng source, hãy build Release trước. Nếu dùng artifact, hãy giải nén toàn bộ ZIP và giữ DLL cùng thư mục với install.ps1."
+    }
+}
+
 $DllPath = [System.IO.Path]::GetFullPath($DllPath)
 if (-not (Test-Path $DllPath)) {
-    throw "Không tìm thấy DLL: $DllPath. Hãy build Release trước."
+    throw "Không tìm thấy DLL: $DllPath"
 }
 
 $clsid = '{7BA1B881-3DA4-4FBA-A25D-5F92141658EE}'
@@ -43,4 +59,5 @@ New-ItemProperty -Path $addinPath -Name 'LoadBehavior' -Value 3 -PropertyType DW
 New-ItemProperty -Path $addinPath -Name 'CommandLineSafe' -Value 0 -PropertyType DWord -Force | Out-Null
 
 Write-Host 'Đã đăng ký Word Gemini Formula cho user hiện tại.' -ForegroundColor Green
+Write-Host "DLL: $DllPath"
 Write-Host 'Đóng toàn bộ Word rồi mở lại. Ribbon mới có tên: AI Formula.'
