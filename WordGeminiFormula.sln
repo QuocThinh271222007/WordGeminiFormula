@@ -1,0 +1,18 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WordGeminiFormula.AddIn", "src\WordGeminiFormula.AddIn\WordGeminiFormula.AddIn.csproj", "{94A7DB7B-03E9-4B38-B98E-D5F13CD54B62}"
+EndProject
+Global
+    GlobalSection(SolutionConfigurationPlatforms) = preSolution
+        Debug|Any CPU = Debug|Any CPU
+        Release|Any CPU = Release|Any CPU
+    EndGlobalSection
+    GlobalSection(ProjectConfigurationPlatforms) = postSolution
+        {94A7DB7B-03E9-4B38-B98E-D5F13CD54B62}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+        {94A7DB7B-03E9-4B38-B98E-D5F13CD54B62}.Debug|Any CPU.Build.0 = Debug|Any CPU
+        {94A7DB7B-03E9-4B38-B98E-D5F13CD54B62}.Release|Any CPU.ActiveCfg = Release|Any CPU
+        {94A7DB7B-03E9-4B38-B98E-D5F13CD54B62}.Release|Any CPU.Build.0 = Release|Any CPU
+    EndGlobalSection
+EndGlobal

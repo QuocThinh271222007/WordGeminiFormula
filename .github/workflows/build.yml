@@ -1,0 +1,29 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Restore and build
+        shell: pwsh
+        run: msbuild WordGeminiFormula.sln /t:Restore,Build /p:Configuration=Release /p:Platform="Any CPU"
+      - name: Stage package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist/WordGeminiFormula -Force | Out-Null
+          Copy-Item src/WordGeminiFormula.AddIn/bin/Release/net48/WordGeminiFormula.AddIn.dll dist/WordGeminiFormula/
+          Copy-Item scripts/install.ps1 dist/WordGeminiFormula/
+          Copy-Item scripts/uninstall.ps1 dist/WordGeminiFormula/
+          Copy-Item README.md dist/WordGeminiFormula/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WordGeminiFormula
+          path: dist/WordGeminiFormula

@@ -1,0 +1,13 @@
+.vs/
+.idea/
+*.user
+*.suo
+bin/
+obj/
+dist/
+TestResults/
+*.pdb
+*.log
+settings.json
+.env
+.env.*
