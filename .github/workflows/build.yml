@@ -44,21 +44,36 @@ jobs:
           $realSet = [string][char]0x211D
           $integralSymbol = [string][char]0x222B
           $vectorAccent = [string][char]0x20D7
-          $matrixToken = [string][char]0x25A0
 
           $integral = $c.NormalizeForWord('\int f(x) \mathrm{d}x = \sin x + C')
           if (-not $integral.Contains($integralSymbol) -or -not $integral.Contains('sin') -or $integral.Contains('\int') -or $integral.Contains('\mathrm')) {
             throw "Integral canonicalization failed: $integral"
           }
+
+          # Câu 4: keep the function argument outside the log-base subscript.
           $log = $c.NormalizeForWord('\log_3(x-1)=1')
-          if (-not $log.StartsWith('log')) { throw "Log canonicalization failed: $log" }
+          if ($log -ne 'log_3 (x-1)=1') {
+            throw "C4 log-base separator regression: $log"
+          }
+
           $vector = $c.NormalizeForWord('\overrightarrow{AB}')
           if (-not $vector.Contains($vectorAccent) -or $vector.Contains('\vec')) { throw "Vector canonicalization failed: $vector" }
-          $system = $c.NormalizeForWord('\begin{cases}x+y<3\\x-y+1>0\end{cases}')
-          if (-not $system.Contains($matrixToken) -or $system.Contains('\begin')) { throw "Cases canonicalization failed: $system" }
+
+          # Câu 8: use Word's dedicated cases linear structure instead of literal { + black-square matrix text.
+          $system = $c.NormalizeForWord('\begin{cases}x+y-3<0\\x-y+1>0\end{cases}')
+          if (-not $system.StartsWith('\case(') -or -not $system.Contains('@') -or $system.Contains('\begin') -or $system.Contains('■')) {
+            throw "C8 cases canonicalization regression: $system"
+          }
+
+          # Câu 9: f_2(x) must not let Word absorb (x) into the subscript.
+          $indexedFunction = $c.NormalizeForWord('f_2(x)=3x^2')
+          if (-not $indexedFunction.StartsWith('f_2 (x)')) {
+            throw "C9 indexed-function separator regression: $indexedFunction"
+          }
+
           $set = $c.NormalizeForWord('\mathbb{R}')
           if (-not $set.Contains($realSet)) { throw "Set canonicalization failed: $set" }
-          Write-Host 'PASS Word-safe integral/log/vector/cases/set canonicalization.' -ForegroundColor Green
+          Write-Host 'PASS Word-safe integral/log/vector/cases/indexed-function/set canonicalization.' -ForegroundColor Green
       - name: Word range safety regression guard
         shell: pwsh
         run: |
