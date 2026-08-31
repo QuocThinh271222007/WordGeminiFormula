@@ -15,26 +15,74 @@ jobs:
       - name: Restore and build
         shell: pwsh
         run: msbuild WordGeminiFormula.sln /t:Restore,Build /p:Configuration=Release /p:Platform="Any CPU"
-      - name: Installer COM activation smoke test
+      - name: Installer COM and Office callback smoke test
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $dll = (Resolve-Path 'src/WordGeminiFormula.AddIn/bin/Release/net48/WordGeminiFormula.AddIn.dll').Path
           & .\scripts\install.ps1 -DllPath $dll
           try {
-            $type = [Type]::GetTypeFromProgID('WordGeminiFormula.AddIn', $true)
-            $addin = [Activator]::CreateInstance($type)
-            if ($null -eq $addin) { throw 'COM activation returned null.' }
-            $xml = $addin.GetCustomUI('Microsoft.Word.Document')
-            if ([string]::IsNullOrWhiteSpace($xml) -or $xml -notmatch '<customUI') {
-              throw 'GetCustomUI did not return Ribbon XML.'
-            }
-            Write-Host 'Installer COM activation and Ribbon XML smoke test passed.' -ForegroundColor Green
+            Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.CompilerServices;
+          using System.Runtime.InteropServices;
+
+          [Guid("289E9AF1-4973-11D1-AE81-00A0C90F26F4")]
+          public enum SmokeConnectMode : uint { AfterStartup = 0, Startup = 1, External = 2, CommandLine = 3, Solution = 4, UISetup = 5 }
+
+          [Guid("289E9AF2-4973-11D1-AE81-00A0C90F26F4")]
+          public enum SmokeDisconnectMode : uint { HostShutdown = 0, UserClosed = 1, UISetupComplete = 2, SolutionClosed = 3 }
+
+          [ComImport, Guid("B65AD801-ABAF-11D0-BB8B-00A0C90F2744"), TypeLibType((short)4160)]
+          public interface ISmokeExtensibility2 {
+              [DispId(1), MethodImpl(MethodImplOptions.InternalCall, MethodCodeType = MethodCodeType.Runtime)]
+              void OnConnection([In, MarshalAs(UnmanagedType.IDispatch)] object application, [In] SmokeConnectMode connectMode, [In, MarshalAs(UnmanagedType.IDispatch)] object addInInst, [In, MarshalAs(UnmanagedType.SafeArray, SafeArraySubType = VarEnum.VT_VARIANT)] ref Array custom);
+              [DispId(2), MethodImpl(MethodImplOptions.InternalCall, MethodCodeType = MethodCodeType.Runtime)]
+              void OnDisconnection([In] SmokeDisconnectMode removeMode, [In, MarshalAs(UnmanagedType.SafeArray, SafeArraySubType = VarEnum.VT_VARIANT)] ref Array custom);
+              [DispId(3), MethodImpl(MethodImplOptions.InternalCall, MethodCodeType = MethodCodeType.Runtime)]
+              void OnAddInsUpdate([In, MarshalAs(UnmanagedType.SafeArray, SafeArraySubType = VarEnum.VT_VARIANT)] ref Array custom);
+              [DispId(4), MethodImpl(MethodImplOptions.InternalCall, MethodCodeType = MethodCodeType.Runtime)]
+              void OnStartupComplete([In, MarshalAs(UnmanagedType.SafeArray, SafeArraySubType = VarEnum.VT_VARIANT)] ref Array custom);
+              [DispId(5), MethodImpl(MethodImplOptions.InternalCall, MethodCodeType = MethodCodeType.Runtime)]
+              void OnBeginShutdown([In, MarshalAs(UnmanagedType.SafeArray, SafeArraySubType = VarEnum.VT_VARIANT)] ref Array custom);
+          }
+
+          [ComImport, Guid("000C0396-0000-0000-C000-000000000046"), TypeLibType((short)0x1040)]
+          public interface ISmokeRibbonExtensibility {
+              [DispId(1), return: MarshalAs(UnmanagedType.BStr)]
+              [MethodImpl(MethodImplOptions.InternalCall, MethodCodeType = MethodCodeType.Runtime)]
+              string GetCustomUI([In, MarshalAs(UnmanagedType.BStr)] string ribbonId);
+          }
+
+          public static class OfficeComSmoke {
+              public static void Run() {
+                  Type type = Type.GetTypeFromProgID("WordGeminiFormula.AddIn", true);
+                  object addin = Activator.CreateInstance(type);
+                  try {
+                      var ext = (ISmokeExtensibility2)addin;
+                      Array custom = new object[0];
+                      ext.OnConnection(null, SmokeConnectMode.Startup, null, ref custom);
+                      ext.OnStartupComplete(ref custom);
+                      ext.OnAddInsUpdate(ref custom);
+
+                      var ribbon = (ISmokeRibbonExtensibility)addin;
+                      string xml = ribbon.GetCustomUI("Microsoft.Word.Document");
+                      if (String.IsNullOrWhiteSpace(xml) || !xml.Contains("<customUI"))
+                          throw new InvalidOperationException("Ribbon XML missing.");
+
+                      ext.OnBeginShutdown(ref custom);
+                      ext.OnDisconnection(SmokeDisconnectMode.HostShutdown, ref custom);
+                  }
+                  finally {
+                      if (Marshal.IsComObject(addin)) Marshal.FinalReleaseComObject(addin);
+                  }
+              }
+          }
+          '@
+            [OfficeComSmoke]::Run()
+            Write-Host 'COM activation, IDTExtensibility2 callbacks, and Ribbon interface smoke test passed.' -ForegroundColor Green
           }
           finally {
-            if ($null -ne $addin -and [Runtime.InteropServices.Marshal]::IsComObject($addin)) {
-              [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($addin)
-            }
             & .\scripts\uninstall.ps1 -DllPath $dll
           }
       - name: Stage package
