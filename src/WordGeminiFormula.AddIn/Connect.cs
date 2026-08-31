@@ -44,8 +44,6 @@ namespace WordGeminiFormula.AddIn
 
         public void OnConnection(object application, ExtConnectMode connectMode, object addInInst, ref Array custom)
         {
-            // Keep startup deliberately minimal. Any expensive work happens only
-            // after a Ribbon button is pressed.
             StartupTrace.Write("OnConnection begin; mode=" + connectMode);
             _wordApplication = application;
             StartupTrace.Write("OnConnection success");
@@ -57,20 +55,9 @@ namespace WordGeminiFormula.AddIn
             _wordApplication = null;
         }
 
-        public void OnAddInsUpdate(ref Array custom)
-        {
-            StartupTrace.Write("OnAddInsUpdate");
-        }
-
-        public void OnStartupComplete(ref Array custom)
-        {
-            StartupTrace.Write("OnStartupComplete");
-        }
-
-        public void OnBeginShutdown(ref Array custom)
-        {
-            StartupTrace.Write("OnBeginShutdown");
-        }
+        public void OnAddInsUpdate(ref Array custom) { StartupTrace.Write("OnAddInsUpdate"); }
+        public void OnStartupComplete(ref Array custom) { StartupTrace.Write("OnStartupComplete"); }
+        public void OnBeginShutdown(ref Array custom) { StartupTrace.Write("OnBeginShutdown"); }
 
         public void OnOpenSettings(object control)
         {
@@ -123,7 +110,25 @@ namespace WordGeminiFormula.AddIn
 
                     var document = _geminiClient.OcrImage(apiKey, settings.model, imagePath);
                     var word = new WordDocumentService(_wordApplication);
-                    word.InsertOcrBlocks(document, settings.autoNormalizeAfterOcr);
+                    word.InsertOcrBlocks(
+                        document,
+                        settings.autoNormalizeAfterOcr,
+                        settings.autoBeautifyAfterOcr,
+                        imagePath,
+                        settings.preserveDifficultRegionsAsImage);
+
+                    string warningText = document.warnings != null && document.warnings.Count > 0
+                        ? "\n\nGemini cảnh báo:\n- " + string.Join("\n- ", document.warnings)
+                        : string.Empty;
+                    string formulaText = settings.autoNormalizeAfterOcr && word.LastNormalizationFailureCount > 0
+                        ? $"\n\nCó {word.LastNormalizationFailureCount} công thức chưa chuyển đổi được và đã được tô vàng để kiểm tra."
+                        : string.Empty;
+
+                    MessageBox.Show(
+                        "Đã OCR và chèn nội dung vào Word." + warningText + formulaText,
+                        "Word Gemini Formula",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
                 }
                 finally
                 {
@@ -139,6 +144,25 @@ namespace WordGeminiFormula.AddIn
             }
         }
 
+        public void OnBeautifyFormat(object control)
+        {
+            try
+            {
+                EnsureConnected();
+                var word = new WordDocumentService(_wordApplication);
+                int count = word.BeautifyActiveDocument();
+                MessageBox.Show(
+                    count == 0 ? "Không tìm thấy đoạn văn nào để format." : $"Đã làm đẹp format cho {count} đoạn văn.",
+                    "Word Gemini Formula",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                ShowError(ex);
+            }
+        }
+
         public void OnNormalizeAll(object control)
         {
             try
@@ -146,9 +170,13 @@ namespace WordGeminiFormula.AddIn
                 EnsureConnected();
                 var word = new WordDocumentService(_wordApplication);
                 int count = word.NormalizeAllMarkedFormulas();
-                MessageBox.Show(count == 0
+                string failed = word.LastNormalizationFailureCount > 0
+                    ? $" Có {word.LastNormalizationFailureCount} công thức chưa chuyển đổi được; chúng được giữ nguyên và tô vàng."
+                    : string.Empty;
+                MessageBox.Show(
+                    count == 0 && word.LastNormalizationFailureCount == 0
                         ? "Không tìm thấy khối [[MATH]] nào để chuẩn hóa."
-                        : $"Đã chuẩn hóa {count} công thức thành Word Equation.",
+                        : $"Đã chuẩn hóa {count} công thức thành Word Equation.{failed}",
                     "Word Gemini Formula",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
