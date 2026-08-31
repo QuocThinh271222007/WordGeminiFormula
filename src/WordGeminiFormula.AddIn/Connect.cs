@@ -108,7 +108,7 @@ namespace WordGeminiFormula.AddIn
                         }
                     }
 
-                    var document = _geminiClient.OcrImage(apiKey, settings.model, imagePath);
+                    var document = _geminiClient.OcrImage(apiKey, settings.model, imagePath, settings.documentPreset);
                     var word = new WordDocumentService(_wordApplication);
                     word.InsertOcrBlocks(
                         document,
