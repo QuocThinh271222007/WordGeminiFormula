@@ -49,31 +49,39 @@ jobs:
           if (-not $integral.Contains($integralSymbol) -or -not $integral.Contains('sin') -or $integral.Contains('\int') -or $integral.Contains('\mathrm')) {
             throw "Integral canonicalization failed: $integral"
           }
-
-          # Câu 4: keep the function argument outside the log-base subscript.
           $log = $c.NormalizeForWord('\log_3(x-1)=1')
-          if ($log -ne 'log_3 (x-1)=1') {
-            throw "C4 log-base separator regression: $log"
-          }
-
+          if ($log -ne 'log_3 (x-1)=1') { throw "C4 log-base separator regression: $log" }
           $vector = $c.NormalizeForWord('\overrightarrow{AB}')
           if (-not $vector.Contains($vectorAccent) -or $vector.Contains('\vec')) { throw "Vector canonicalization failed: $vector" }
-
-          # Câu 8: use Word's dedicated cases linear structure instead of literal { + black-square matrix text.
           $system = $c.NormalizeForWord('\begin{cases}x+y-3<0\\x-y+1>0\end{cases}')
           if (-not $system.StartsWith('\case(') -or -not $system.Contains('@') -or $system.Contains('\begin') -or $system.Contains('■')) {
-            throw "C8 cases canonicalization regression: $system"
+            throw "C8 legacy cases fallback regression: $system"
           }
-
-          # Câu 9: f_2(x) must not let Word absorb (x) into the subscript.
           $indexedFunction = $c.NormalizeForWord('f_2(x)=3x^2')
-          if (-not $indexedFunction.StartsWith('f_2 (x)')) {
-            throw "C9 indexed-function separator regression: $indexedFunction"
-          }
-
+          if (-not $indexedFunction.StartsWith('f_2 (x)')) { throw "C9 indexed-function separator regression: $indexedFunction" }
           $set = $c.NormalizeForWord('\mathbb{R}')
           if (-not $set.Contains($realSet)) { throw "Set canonicalization failed: $set" }
-          Write-Host 'PASS Word-safe integral/log/vector/cases/indexed-function/set canonicalization.' -ForegroundColor Green
+          Write-Host 'PASS legacy Word-linear fallback canonicalization.' -ForegroundColor Green
+      - name: MathML V5 structure regression guard
+        shell: pwsh
+        run: |
+          $models = Get-Content 'src/WordGeminiFormula.AddIn/Models/OcrModels.cs' -Raw
+          $gemini = Get-Content 'src/WordGeminiFormula.AddIn/Gemini/GeminiClient.cs' -Raw
+          $v5 = Get-Content 'src/WordGeminiFormula.AddIn/Word/WordDocumentServiceV5.cs' -Raw
+          $connect = Get-Content 'src/WordGeminiFormula.AddIn/Connect.cs' -Raw
+
+          if ($models -notmatch 'string\s+mathml') { throw 'OCR model is missing MathML payloads.' }
+          if ($gemini -notmatch 'Presentation MathML 3' -or $gemini -notmatch '<mn>0,5</mn>' -or $gemini -notmatch '<mtable>') {
+            throw 'Gemini prompt no longer enforces structure-preserving MathML for decimal commas/cases.'
+          }
+          if ($connect -notmatch 'new\s+WordDocumentServiceV5\(') { throw 'Connect is not routed through V5.' }
+          if ($v5 -notmatch 'MML2OMML\.XSL' -or $v5 -notmatch 'InsertXML' -or $v5 -notmatch 'TryNormalizeMathMl') {
+            throw 'V5 MathML -> OMML import path is incomplete.'
+          }
+          if ($v5 -notmatch 'SessionPayloads' -or $v5 -notmatch 'Document\.Variables|document\.Variables') {
+            throw 'V5 pending MathML payload persistence is missing.'
+          }
+          Write-Host 'PASS MathML-first V5 guards cover Q6 decimal comma and Q8 cases structure.' -ForegroundColor Green
       - name: Word range safety regression guard
         shell: pwsh
         run: |
@@ -84,37 +92,31 @@ jobs:
             throw 'Unsafe flattened-text Word Range normalization has returned.'
           }
           Write-Host 'PASS legacy service has no flattened-text offset normalization.' -ForegroundColor Green
-      - name: Bookmark and V4 renderer regression guard
+      - name: Bookmark and V4 layout regression guard
         shell: pwsh
         run: |
-          $connect = Get-Content 'src/WordGeminiFormula.AddIn/Connect.cs' -Raw
           $safe = Get-Content 'src/WordGeminiFormula.AddIn/Word/WordDocumentServiceV3.cs' -Raw
           $v4 = Get-Content 'src/WordGeminiFormula.AddIn/Word/WordDocumentServiceV4.cs' -Raw
-          if ($connect -notmatch 'new\s+WordDocumentServiceV4\(') {
-            throw 'Connect is not routed through WordDocumentServiceV4.'
-          }
-          if ($safe -match 'ContentControls\.Add|WdContentControlRichText') {
-            throw 'V3 bookmark renderer must not create Content Controls.'
-          }
+          if ($safe -match 'ContentControls\.Add|WdContentControlRichText') { throw 'V3 bookmark renderer must not create Content Controls.' }
           if ($safe -notmatch 'Bookmarks\.Add' -or $safe -notmatch 'PendingMathBookmarkPrefix' -or $safe -notmatch 'OrderByDescending') {
             throw 'Non-locking bookmark math tracking safeguards are missing.'
           }
           if ($v4 -notmatch 'SplitAtFirstNewline' -or $v4 -notmatch 'SetPrimaryFooter' -or $v4 -notmatch 'ApplyCompactExamLayout') {
             throw 'V4 visual anchoring / footer / compact exam safeguards are missing.'
           }
-          Write-Host 'PASS active V4 renderer uses bookmark-safe math, anchored visuals and compact exam layout.' -ForegroundColor Green
+          Write-Host 'PASS V3/V4 layout and bookmark safety remain intact under V5.' -ForegroundColor Green
       - name: Deferred Word math render regression guard
         shell: pwsh
         run: |
           $path = 'src/WordGeminiFormula.AddIn/Connect.cs'
           $source = Get-Content $path -Raw
           if ($source -notmatch 'word\.InsertOcrBlocks\([\s\S]*?document,\s*false,') {
-            throw 'OCR renderer must receive autoNormalize=false so it never builds OMath while still typing the document.'
+            throw 'OCR renderer must receive autoNormalize=false so it never inserts Office Math while still typing the document.'
           }
           if ($source -notmatch 'if\s*\(settings\.autoNormalizeAfterOcr\)[\s\S]*?word\.NormalizeAllMarkedFormulas\(\)') {
             throw 'Deferred post-render math normalization pass is missing.'
           }
-          Write-Host 'PASS OCR rendering and OMath normalization are separated into two passes.' -ForegroundColor Green
+          Write-Host 'PASS OCR rendering and MathML/OMML normalization remain separate passes.' -ForegroundColor Green
       - name: Installer COM and Office interface smoke test
         shell: powershell
         run: |
@@ -146,11 +148,8 @@ jobs:
             }
 
             $xml = $addin.GetCustomUI('Microsoft.Word.Document')
-            if ([string]::IsNullOrWhiteSpace($xml) -or $xml -notmatch '<customUI') {
-              throw 'GetCustomUI did not return Ribbon XML.'
-            }
-
-            Write-Host 'COM activation, IDTExtensibility2 IID, IRibbonExtensibility IID, and Ribbon XML smoke test passed.' -ForegroundColor Green
+            if ([string]::IsNullOrWhiteSpace($xml) -or $xml -notmatch '<customUI') { throw 'GetCustomUI did not return Ribbon XML.' }
+            Write-Host 'COM activation, Office IIDs and Ribbon XML smoke test passed.' -ForegroundColor Green
           }
           finally {
             if ($null -ne $addin -and [Runtime.InteropServices.Marshal]::IsComObject($addin)) {
