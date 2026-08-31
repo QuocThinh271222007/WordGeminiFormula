@@ -42,11 +42,12 @@ jobs:
           Add-Type -Path $dll
           $c = New-Object WordGeminiFormula.AddIn.Word.WordMathCanonicalizer
           $realSet = [string][char]0x211D
+          $integralSymbol = [string][char]0x222B
           $vectorAccent = [string][char]0x20D7
           $matrixToken = [string][char]0x25A0
 
           $integral = $c.NormalizeForWord('\int f(x) \mathrm{d}x = \sin x + C')
-          if (-not $integral.Contains('∫') -or -not $integral.Contains('sin') -or $integral.Contains('\int') -or $integral.Contains('\mathrm')) {
+          if (-not $integral.Contains($integralSymbol) -or -not $integral.Contains('sin') -or $integral.Contains('\int') -or $integral.Contains('\mathrm')) {
             throw "Integral canonicalization failed: $integral"
           }
           $log = $c.NormalizeForWord('\log_3(x-1)=1')
