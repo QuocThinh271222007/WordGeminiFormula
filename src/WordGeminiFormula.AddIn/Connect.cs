@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows.Forms;
 using WordGeminiFormula.AddIn.Gemini;
 using WordGeminiFormula.AddIn.Interop;
@@ -109,6 +110,8 @@ namespace WordGeminiFormula.AddIn
                     }
 
                     var document = _geminiClient.OcrImage(apiKey, settings.model, imagePath, settings.documentPreset);
+                    string rawSnapshotPath = SaveRawOcrSnapshot(_geminiClient.LastRawOcrJson);
+
                     var word = new WordDocumentService(_wordApplication);
                     word.InsertOcrBlocks(
                         document,
@@ -121,11 +124,14 @@ namespace WordGeminiFormula.AddIn
                         ? "\n\nGemini cảnh báo:\n- " + string.Join("\n- ", document.warnings)
                         : string.Empty;
                     string formulaText = settings.autoNormalizeAfterOcr && word.LastNormalizationFailureCount > 0
-                        ? $"\n\nCó {word.LastNormalizationFailureCount} công thức chưa chuyển đổi được và đã được tô vàng để kiểm tra."
+                        ? $"\n\nCó {word.LastNormalizationFailureCount} công thức chưa chuyển đổi được và đã được giữ nguyên/tô vàng để kiểm tra."
                         : string.Empty;
+                    string snapshotText = string.IsNullOrWhiteSpace(rawSnapshotPath)
+                        ? string.Empty
+                        : "\n\nRaw OCR: " + rawSnapshotPath;
 
                     MessageBox.Show(
-                        "Đã OCR và chèn nội dung vào Word." + warningText + formulaText,
+                        "Đã OCR và chèn nội dung vào Word." + warningText + formulaText + snapshotText,
                         "Word Gemini Formula",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Information);
@@ -175,7 +181,7 @@ namespace WordGeminiFormula.AddIn
                     : string.Empty;
                 MessageBox.Show(
                     count == 0 && word.LastNormalizationFailureCount == 0
-                        ? "Không tìm thấy khối [[MATH]] nào để chuẩn hóa."
+                        ? "Không tìm thấy công thức chờ chuẩn hóa."
                         : $"Đã chuẩn hóa {count} công thức thành Word Equation.{failed}",
                     "Word Gemini Formula",
                     MessageBoxButtons.OK,
@@ -204,6 +210,26 @@ namespace WordGeminiFormula.AddIn
         {
             if (_wordApplication == null)
                 throw new InvalidOperationException("Add-in chưa kết nối được với Microsoft Word.");
+        }
+
+        private static string SaveRawOcrSnapshot(string rawJson)
+        {
+            if (string.IsNullOrWhiteSpace(rawJson)) return null;
+            try
+            {
+                string dir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "WordGeminiFormula");
+                Directory.CreateDirectory(dir);
+                string path = Path.Combine(dir, "last-ocr.json");
+                File.WriteAllText(path, rawJson, new UTF8Encoding(false));
+                return path;
+            }
+            catch (Exception ex)
+            {
+                StartupTrace.Write("SaveRawOcrSnapshot FAILED: " + ex.Message);
+                return null;
+            }
         }
 
         private static void ShowError(Exception ex)
