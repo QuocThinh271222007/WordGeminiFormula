@@ -2,7 +2,6 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Text;
 using System.Xml;
 using System.Xml.Xsl;
@@ -11,16 +10,9 @@ using WordGeminiFormula.AddIn.Models;
 namespace WordGeminiFormula.AddIn.Word
 {
     /// <summary>
-    /// V5 math-structure layer.
-    ///
-    /// V4 remains responsible for document layout, images, tables and compact exam styling.
-    /// V5 changes only the equation pipeline: when Gemini provides Presentation MathML,
-    /// the formula is rendered through Word's own MML2OMML.XSL transform instead of
-    /// asking OMath.BuildUp to guess structure from linear text.
-    ///
-    /// This fixes classes of errors that cannot be made reliable with regex rules alone,
-    /// such as decimal commas, P(A), cases/systems, matrices, nested radicals/fractions,
-    /// scripts, accents and other structured mathematical constructs.
+    /// V5 math-structure layer. V4 keeps responsibility for page/layout rendering;
+    /// V5 replaces ambiguous Word-linear parsing with Presentation MathML -> OMML when
+    /// Gemini supplies MathML, while retaining the old converter as a safe fallback.
     /// </summary>
     public sealed class WordDocumentServiceV5
     {
@@ -36,13 +28,10 @@ namespace WordGeminiFormula.AddIn.Word
         private readonly WordDocumentServiceV4 _inner;
         private readonly MathMlOfficeBridge _mathMlBridge;
 
-        // New service instances are created for Ribbon callbacks. Keep payloads for the
-        // current Word process, and also persist them into Document.Variables best-effort.
         private static readonly ConcurrentDictionary<string, PendingMathMl> SessionPayloads =
             new ConcurrentDictionary<string, PendingMathMl>(StringComparer.OrdinalIgnoreCase);
 
         private int _v5FailureCount;
-
         public int LastNormalizationFailureCount => _v5FailureCount + _inner.LastNormalizationFailureCount;
 
         public WordDocumentServiceV5(object wordApplication)
@@ -52,36 +41,16 @@ namespace WordGeminiFormula.AddIn.Word
             _mathMlBridge = new MathMlOfficeBridge(wordApplication);
         }
 
-        public void InsertOcrBlocks(
-            OcrDocument document,
-            bool autoNormalize,
-            bool autoBeautify,
-            string sourceImagePath,
-            bool preserveDifficultRegions)
+        public void InsertOcrBlocks(OcrDocument document, bool autoNormalize, bool autoBeautify, string sourceImagePath, bool preserveDifficultRegions)
         {
             if (document == null) return;
-
             _v5FailureCount = 0;
             OcrDocument prepared = PrepareMathMlSentinels(document);
-
-            // V4/V3 still perform the safe bookmark-only first pass. MathML is never
-            // inserted while Word is still typing the page.
-            _inner.InsertOcrBlocks(
-                prepared,
-                false,
-                autoBeautify,
-                sourceImagePath,
-                preserveDifficultRegions);
+            _inner.InsertOcrBlocks(prepared, false, autoBeautify, sourceImagePath, preserveDifficultRegions);
         }
 
         public int BeautifyActiveDocument() => _inner.BeautifyActiveDocument();
-
-        public void NormalizeSelection()
-        {
-            // Manual selection is intentionally kept on the legacy LaTeX/UnicodeMath path,
-            // because a selected string has no associated Gemini MathML payload.
-            _inner.NormalizeSelection();
-        }
+        public void NormalizeSelection() => _inner.NormalizeSelection();
 
         public int NormalizeAllMarkedFormulas()
         {
@@ -89,8 +58,10 @@ namespace WordGeminiFormula.AddIn.Word
             _v5FailureCount = 0;
             int converted = 0;
 
-            var pending = SnapshotPendingBookmarks(document);
-            foreach (PendingBookmark info in pending.OrderByDescending(x => x.Start))
+            List<PendingBookmark> pending = SnapshotPendingBookmarks((object)document);
+            pending.Sort(delegate(PendingBookmark a, PendingBookmark b) { return b.Start.CompareTo(a.Start); });
+
+            foreach (PendingBookmark info in pending)
             {
                 try
                 {
@@ -98,11 +69,10 @@ namespace WordGeminiFormula.AddIn.Word
                     dynamic bookmark = document.Bookmarks.Item(info.Name);
                     string marker = Convert.ToString(bookmark.Range.Text) ?? string.Empty;
                     string token = ExtractMathPayload(marker);
-                    if (!token.StartsWith(SentinelPrefix, StringComparison.OrdinalIgnoreCase))
-                        continue;
+                    if (!token.StartsWith(SentinelPrefix, StringComparison.OrdinalIgnoreCase)) continue;
 
                     PendingMathMl payload;
-                    if (!TryLoadPayload(document, token, out payload))
+                    if (!TryLoadPayload((object)document, token, out payload))
                     {
                         RestoreFallbackBookmark(document, bookmark, token, token);
                         _v5FailureCount++;
@@ -112,15 +82,12 @@ namespace WordGeminiFormula.AddIn.Word
                     if (TryReplaceBookmarkWithMathMl(document, bookmark, payload.MathMl))
                     {
                         converted++;
-                        DeletePayload(document, token);
+                        DeletePayload((object)document, token);
                     }
                     else
                     {
-                        // If native MathML insertion is unavailable on a particular Office
-                        // installation, restore original LaTeX and let V4/V3 use its old
-                        // converter rather than losing the formula.
                         RestoreFallbackBookmark(document, bookmark, token, payload.Latex);
-                        DeletePayload(document, token);
+                        DeletePayload((object)document, token);
                     }
                 }
                 catch
@@ -129,7 +96,7 @@ namespace WordGeminiFormula.AddIn.Word
                 }
             }
 
-            // Process restored LaTeX fallbacks and old documents made before V5.
+            // Restored LaTeX fallbacks and documents created before V5 still work.
             converted += _inner.NormalizeAllMarkedFormulas();
             return converted;
         }
@@ -148,7 +115,8 @@ namespace WordGeminiFormula.AddIn.Word
                 if (sourceBlock == null) continue;
                 OcrBlock block = CloneBlock(sourceBlock);
 
-                if (IsMathType(block.type) && TryCreateSentinel(sourceBlock.mathml, sourceBlock.latex, sourceBlock.word_linear, out string blockToken))
+                string blockToken;
+                if (IsMathType(block.type) && TryCreateSentinel(sourceBlock.mathml, sourceBlock.latex, sourceBlock.word_linear, out blockToken))
                 {
                     block.latex = blockToken;
                     block.word_linear = null;
@@ -160,16 +128,10 @@ namespace WordGeminiFormula.AddIn.Word
                 foreach (OcrChoice sourceChoice in sourceBlock.choices ?? new List<OcrChoice>())
                 {
                     if (sourceChoice == null) continue;
-                    block.choices.Add(new OcrChoice
-                    {
-                        label = sourceChoice.label,
-                        content = PrepareParts(sourceChoice.content)
-                    });
+                    block.choices.Add(new OcrChoice { label = sourceChoice.label, content = PrepareParts(sourceChoice.content) });
                 }
-
                 result.blocks.Add(block);
             }
-
             return result;
         }
 
@@ -182,7 +144,8 @@ namespace WordGeminiFormula.AddIn.Word
             {
                 if (source == null) continue;
                 OcrInline part = CloneInline(source);
-                if (IsMathType(source.type) && TryCreateSentinel(source.mathml, source.latex, source.word_linear, out string token))
+                string token;
+                if (IsMathType(source.type) && TryCreateSentinel(source.mathml, source.latex, source.word_linear, out token))
                 {
                     part.latex = token;
                     part.word_linear = null;
@@ -197,14 +160,13 @@ namespace WordGeminiFormula.AddIn.Word
         {
             token = null;
             string normalizedMathMl;
-            if (!_mathMlBridge.TryNormalizeMathMl(mathml, out normalizedMathMl))
-                return false;
+            if (!_mathMlBridge.TryNormalizeMathMl(mathml, out normalizedMathMl)) return false;
 
             token = SentinelPrefix + Guid.NewGuid().ToString("N").Substring(0, 24);
             string fallback = !string.IsNullOrWhiteSpace(latex) ? latex.Trim() : (wordLinear ?? string.Empty).Trim();
             var payload = new PendingMathMl { MathMl = normalizedMathMl, Latex = fallback };
             SessionPayloads[token] = payload;
-            PersistPayloadBestEffort(_wordApplication.ActiveDocument, token, payload);
+            PersistPayloadBestEffort((object)_wordApplication.ActiveDocument, token, payload);
             return true;
         }
 
@@ -214,7 +176,6 @@ namespace WordGeminiFormula.AddIn.Word
             int start = (int)bookmark.Range.Start;
             int end = (int)bookmark.Range.End;
             string name = Convert.ToString(bookmark.Name) ?? string.Empty;
-
             try
             {
                 bookmark.Delete();
@@ -224,8 +185,6 @@ namespace WordGeminiFormula.AddIn.Word
             }
             catch
             {
-                // Recreate a bookmark over the original marker when possible so fallback
-                // handling can safely replace it with LaTeX.
                 try
                 {
                     dynamic original = document.Range(start, Math.Min((int)document.Content.End, start + marker.Length));
@@ -252,8 +211,9 @@ namespace WordGeminiFormula.AddIn.Word
             try { restored.HighlightColorIndex = WdYellow; } catch { }
         }
 
-        private static List<PendingBookmark> SnapshotPendingBookmarks(dynamic document)
+        private static List<PendingBookmark> SnapshotPendingBookmarks(object documentObject)
         {
+            dynamic document = documentObject;
             var result = new List<PendingBookmark>();
             dynamic bookmarks = document.Bookmarks;
             int count = (int)bookmarks.Count;
@@ -281,23 +241,21 @@ namespace WordGeminiFormula.AddIn.Word
                    string.Equals(type, "formula", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static void PersistPayloadBestEffort(dynamic document, string token, PendingMathMl payload)
+        private static void PersistPayloadBestEffort(object documentObject, string token, PendingMathMl payload)
         {
+            dynamic document = documentObject;
             try
             {
                 UpsertVariable(document, VariableMathMlPrefix + token, Encode(payload.MathMl));
                 UpsertVariable(document, VariableLatexPrefix + token, Encode(payload.Latex));
             }
-            catch
-            {
-                // SessionPayloads still keeps the current Word session functional.
-            }
+            catch { }
         }
 
-        private static bool TryLoadPayload(dynamic document, string token, out PendingMathMl payload)
+        private static bool TryLoadPayload(object documentObject, string token, out PendingMathMl payload)
         {
             if (SessionPayloads.TryGetValue(token, out payload)) return true;
-
+            dynamic document = documentObject;
             try
             {
                 string mathml = Decode(Convert.ToString(document.Variables.Item(VariableMathMlPrefix + token).Value));
@@ -314,9 +272,11 @@ namespace WordGeminiFormula.AddIn.Word
             }
         }
 
-        private static void DeletePayload(dynamic document, string token)
+        private static void DeletePayload(object documentObject, string token)
         {
-            SessionPayloads.TryRemove(token, out _);
+            PendingMathMl removed;
+            SessionPayloads.TryRemove(token, out removed);
+            dynamic document = documentObject;
             TryDeleteVariable(document, VariableMathMlPrefix + token);
             TryDeleteVariable(document, VariableLatexPrefix + token);
         }
@@ -332,16 +292,8 @@ namespace WordGeminiFormula.AddIn.Word
             try { document.Variables.Item(name).Delete(); } catch { }
         }
 
-        private static string Encode(string value)
-        {
-            return Convert.ToBase64String(Encoding.UTF8.GetBytes(value ?? string.Empty));
-        }
-
-        private static string Decode(string value)
-        {
-            if (string.IsNullOrWhiteSpace(value)) return string.Empty;
-            return Encoding.UTF8.GetString(Convert.FromBase64String(value));
-        }
+        private static string Encode(string value) => Convert.ToBase64String(Encoding.UTF8.GetBytes(value ?? string.Empty));
+        private static string Decode(string value) => string.IsNullOrWhiteSpace(value) ? string.Empty : Encoding.UTF8.GetString(Convert.FromBase64String(value));
 
         private static OcrBlock CloneBlock(OcrBlock source)
         {
@@ -356,13 +308,7 @@ namespace WordGeminiFormula.AddIn.Word
                 mathml = source.mathml,
                 confidence = source.confidence,
                 display = source.display,
-                bbox = source.bbox == null ? null : new OcrBoundingBox
-                {
-                    x = source.bbox.x,
-                    y = source.bbox.y,
-                    width = source.bbox.width,
-                    height = source.bbox.height
-                },
+                bbox = source.bbox == null ? null : new OcrBoundingBox { x = source.bbox.x, y = source.bbox.y, width = source.bbox.width, height = source.bbox.height },
                 content = new List<OcrInline>(),
                 choices = new List<OcrChoice>()
             };
@@ -394,12 +340,6 @@ namespace WordGeminiFormula.AddIn.Word
         }
     }
 
-    /// <summary>
-    /// Imports Presentation MathML into native Office Math using Microsoft's own
-    /// MML2OMML.XSL stylesheet shipped with desktop Word. Microsoft 365 supports
-    /// Presentation MathML import; using the Office transform preserves mathematical
-    /// structure instead of relying on ambiguous linear-parser heuristics.
-    /// </summary>
     internal sealed class MathMlOfficeBridge
     {
         private const string MathMlNamespace = "http://www.w3.org/1998/Math/MathML";
@@ -416,53 +356,34 @@ namespace WordGeminiFormula.AddIn.Word
         {
             normalized = null;
             if (string.IsNullOrWhiteSpace(value)) return false;
-
             try
             {
-                var settings = new XmlReaderSettings
-                {
-                    DtdProcessing = DtdProcessing.Prohibit,
-                    XmlResolver = null
-                };
+                var settings = new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null };
                 var doc = new XmlDocument { XmlResolver = null, PreserveWhitespace = true };
                 using (var sr = new StringReader(value.Trim()))
-                using (var reader = XmlReader.Create(sr, settings))
-                    doc.Load(reader);
+                using (var reader = XmlReader.Create(sr, settings)) doc.Load(reader);
 
                 XmlElement root = doc.DocumentElement;
-                if (root == null || !string.Equals(root.LocalName, "math", StringComparison.OrdinalIgnoreCase))
-                    return false;
-                if (!string.Equals(root.NamespaceURI, MathMlNamespace, StringComparison.Ordinal))
-                    return false;
-
+                if (root == null || !string.Equals(root.LocalName, "math", StringComparison.OrdinalIgnoreCase)) return false;
+                if (!string.Equals(root.NamespaceURI, MathMlNamespace, StringComparison.Ordinal)) return false;
                 normalized = doc.OuterXml;
                 return true;
             }
-            catch
-            {
-                return false;
-            }
+            catch { return false; }
         }
 
         public void InsertMathMl(dynamic range, string mathml)
         {
             string normalized;
-            if (!TryNormalizeMathMl(mathml, out normalized))
-                throw new InvalidOperationException("MathML OCR không hợp lệ.");
-
+            if (!TryNormalizeMathMl(mathml, out normalized)) throw new InvalidOperationException("MathML OCR không hợp lệ.");
             string xsl = GetStylesheetText();
 
-            // Preferred path: let Word apply the same transform it uses for MathML import.
             try
             {
                 range.InsertXML(normalized, xsl);
                 return;
             }
-            catch
-            {
-                // Some Word builds are stricter about InsertXML's Transform argument.
-                // Transform with .NET first, then insert the resulting OMML fragment.
-            }
+            catch { }
 
             string omml = TransformToOmml(normalized, GetStylesheetPath());
             range.InsertXML(omml);
@@ -477,40 +398,44 @@ namespace WordGeminiFormula.AddIn.Word
 
         private string GetStylesheetPath()
         {
-            if (!string.IsNullOrWhiteSpace(_stylesheetPath) && File.Exists(_stylesheetPath))
-                return _stylesheetPath;
+            if (!string.IsNullOrWhiteSpace(_stylesheetPath) && File.Exists(_stylesheetPath)) return _stylesheetPath;
 
             var candidates = new List<string>();
             try
             {
                 string wordPath = Convert.ToString(_wordApplication.Path);
-                if (!string.IsNullOrWhiteSpace(wordPath))
-                    candidates.Add(Path.Combine(wordPath, "MML2OMML.XSL"));
+                if (!string.IsNullOrWhiteSpace(wordPath)) candidates.Add(Path.Combine(wordPath, "MML2OMML.XSL"));
             }
             catch { }
 
-            string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-            string programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
-            foreach (string root in new[] { programFiles, programFilesX86 }.Where(x => !string.IsNullOrWhiteSpace(x)))
+            string pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            string pfx86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            AddOfficeCandidates(candidates, pf);
+            AddOfficeCandidates(candidates, pfx86);
+
+            foreach (string candidate in candidates)
             {
-                candidates.Add(Path.Combine(root, "Microsoft Office", "root", "Office16", "MML2OMML.XSL"));
-                candidates.Add(Path.Combine(root, "Microsoft Office", "Office16", "MML2OMML.XSL"));
+                if (File.Exists(candidate))
+                {
+                    _stylesheetPath = candidate;
+                    return _stylesheetPath;
+                }
             }
 
-            _stylesheetPath = candidates.FirstOrDefault(File.Exists);
-            if (string.IsNullOrWhiteSpace(_stylesheetPath))
-                throw new FileNotFoundException(
-                    "Không tìm thấy MML2OMML.XSL của Microsoft Word. Tool sẽ fallback sang bộ chuyển LaTeX cũ.");
-            return _stylesheetPath;
+            throw new FileNotFoundException("Không tìm thấy MML2OMML.XSL của Microsoft Word. Tool sẽ fallback sang bộ chuyển LaTeX cũ.");
+        }
+
+        private static void AddOfficeCandidates(List<string> candidates, string root)
+        {
+            if (string.IsNullOrWhiteSpace(root)) return;
+            candidates.Add(Path.Combine(root, "Microsoft Office", "root", "Office16", "MML2OMML.XSL"));
+            candidates.Add(Path.Combine(root, "Microsoft Office", "Office16", "MML2OMML.XSL"));
         }
 
         private static string TransformToOmml(string mathml, string stylesheetPath)
         {
             var transform = new XslCompiledTransform();
-            var xsltSettings = new XsltSettings(false, false);
-            var resolver = new XmlUrlResolver();
-            transform.Load(stylesheetPath, xsltSettings, resolver);
-
+            transform.Load(stylesheetPath, new XsltSettings(false, false), new XmlUrlResolver());
             var inputSettings = new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null };
             using (var inputText = new StringReader(mathml))
             using (var input = XmlReader.Create(inputText, inputSettings))
