@@ -116,7 +116,9 @@ namespace WordGeminiFormula.AddIn.Gemini
                 foreach (var part in block.content.Where(p => p != null))
                 {
                     part.type = (part.type ?? "text").Trim().ToLowerInvariant();
-                    part.text = part.text?.Trim();
+                    // Do not Trim inline prose: leading/trailing spaces carry the
+                    // boundary between prose and an adjacent formula fragment.
+                    part.text = part.text ?? string.Empty;
                     part.latex = part.latex?.Trim();
                     part.word_linear = part.word_linear?.Trim();
                 }
@@ -128,7 +130,7 @@ namespace WordGeminiFormula.AddIn.Gemini
                     foreach (var part in choice.content.Where(p => p != null))
                     {
                         part.type = (part.type ?? "text").Trim().ToLowerInvariant();
-                        part.text = part.text?.Trim();
+                        part.text = part.text ?? string.Empty;
                         part.latex = part.latex?.Trim();
                         part.word_linear = part.word_linear?.Trim();
                     }
@@ -220,6 +222,7 @@ CORE REQUIREMENTS
 - Preserve reading order, punctuation and visible document hierarchy.
 - Recognize layout semantics instead of emitting every visual line as an unrelated paragraph.
 - Keep mathematical expressions as math fragments, not flattened prose.
+- Preserve spaces at the boundaries of inline text fragments so prose and formulas do not run together.
 - Use standard mathematical notation when the image is visually unambiguous: f(x), g(x), u_n, u_1, P(A), vectors, coordinates, intervals, derivatives, integrals, matrices, cases, logarithm bases, etc.
 - If a symbol is genuinely unclear, keep the most literal reading and lower confidence; do not guess a different problem.
 
@@ -244,7 +247,8 @@ RETURN JSON ONLY. Use this schema:
       ""number"": ""1"",
       ""content"": [
         { ""type"": ""text"", ""text"": ""Cho cấp số cộng "" },
-        { ""type"": ""math"", ""latex"": ""u_n"", ""word_linear"": ""u_n"", ""confidence"": 1.0 }
+        { ""type"": ""math"", ""latex"": ""u_n"", ""word_linear"": ""u_n"", ""confidence"": 1.0 },
+        { ""type"": ""text"", ""text"": "" có "" }
       ],
       ""choices"": [
         { ""label"": ""A"", ""content"": [{ ""type"": ""text"", ""text"": ""4."" }] }
