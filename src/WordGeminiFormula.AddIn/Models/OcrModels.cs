@@ -11,7 +11,7 @@ namespace WordGeminiFormula.AddIn.Models
 
     public sealed class OcrBlock
     {
-        // Supported V0.2 types include:
+        // Supported V0.3 types include:
         // header_left, header_right, title, subtitle, meta, candidate_field,
         // code_box, section, question, text, formula, figure, table_image,
         // unresolved and footer.
@@ -21,6 +21,12 @@ namespace WordGeminiFormula.AddIn.Models
         public string number { get; set; }
         public string latex { get; set; }
         public string word_linear { get; set; }
+
+        // Presentation MathML 3. This is the preferred structure-preserving path into
+        // Microsoft Office Math. LaTeX/word_linear remain fallbacks for old OCR payloads
+        // and for environments where Word's MathML transform is unavailable.
+        public string mathml { get; set; }
+
         public double confidence { get; set; } = 1.0;
         public bool display { get; set; }
         public List<OcrInline> content { get; set; } = new List<OcrInline>();
@@ -34,6 +40,7 @@ namespace WordGeminiFormula.AddIn.Models
         public string text { get; set; }
         public string latex { get; set; }
         public string word_linear { get; set; }
+        public string mathml { get; set; }
         public double confidence { get; set; } = 1.0;
     }
 
