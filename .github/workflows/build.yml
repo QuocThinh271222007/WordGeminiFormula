@@ -49,6 +49,18 @@ jobs:
             throw 'Tracked Content Control / Word Range.Find normalization safeguards are missing.'
           }
           Write-Host 'PASS Word formula ranges are tracked by Word, not flattened text offsets.' -ForegroundColor Green
+      - name: Deferred Word math render regression guard
+        shell: pwsh
+        run: |
+          $path = 'src/WordGeminiFormula.AddIn/Connect.cs'
+          $source = Get-Content $path -Raw
+          if ($source -notmatch 'word\.InsertOcrBlocks\([\s\S]*?document,\s*false,') {
+            throw 'OCR renderer must receive autoNormalize=false so it never builds OMath while still typing the document.'
+          }
+          if ($source -notmatch 'if\s*\(settings\.autoNormalizeAfterOcr\)[\s\S]*?word\.NormalizeAllMarkedFormulas\(\)') {
+            throw 'Deferred post-render math normalization pass is missing.'
+          }
+          Write-Host 'PASS OCR rendering and OMath normalization are separated into two passes.' -ForegroundColor Green
       - name: Installer COM and Office interface smoke test
         shell: powershell
         run: |
