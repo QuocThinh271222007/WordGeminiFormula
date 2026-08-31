@@ -45,10 +45,22 @@ jobs:
               $source -match '(?m)^\s*int\s+\w+\s*=\s*match\.Index\s*;') {
             throw 'Unsafe flattened-text Word Range normalization has returned.'
           }
-          if ($source -notmatch 'PendingMathTagPrefix' -or $source -notmatch 'ContentControls' -or $source -notmatch 'FindTextRange') {
-            throw 'Tracked Content Control / Word Range.Find normalization safeguards are missing.'
+          Write-Host 'PASS legacy service has no flattened-text offset normalization.' -ForegroundColor Green
+      - name: Bookmark renderer regression guard
+        shell: pwsh
+        run: |
+          $connect = Get-Content 'src/WordGeminiFormula.AddIn/Connect.cs' -Raw
+          $safe = Get-Content 'src/WordGeminiFormula.AddIn/Word/WordDocumentServiceV3.cs' -Raw
+          if ($connect -notmatch 'new\s+WordDocumentServiceV3\(') {
+            throw 'Connect is not routed through WordDocumentServiceV3.'
           }
-          Write-Host 'PASS Word formula ranges are tracked by Word, not flattened text offsets.' -ForegroundColor Green
+          if ($safe -match 'ContentControls\.Add|WdContentControlRichText') {
+            throw 'V3 renderer must not create Content Controls; they create limited editing zones.'
+          }
+          if ($safe -notmatch 'Bookmarks\.Add' -or $safe -notmatch 'PendingMathBookmarkPrefix' -or $safe -notmatch 'OrderByDescending') {
+            throw 'Non-locking bookmark math tracking safeguards are missing.'
+          }
+          Write-Host 'PASS active OCR renderer tracks pending math with non-locking Word bookmarks.' -ForegroundColor Green
       - name: Deferred Word math render regression guard
         shell: pwsh
         run: |
