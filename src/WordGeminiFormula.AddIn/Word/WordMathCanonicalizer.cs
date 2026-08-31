@@ -65,18 +65,26 @@ namespace WordGeminiFormula.AddIn.Word
             s = ReplaceUnaryBraced(s, "vec", body => "(" + body + ")⃗");
             s = ReplaceUnaryBraced(s, "hat", body => "(" + body + ")̂");
 
-            // Word's UnicodeMath matrix object is represented by U+25A0 (black square).
-            // This avoids relying on Math AutoCorrect to turn the literal \\matrix token
-            // into the matrix object during a programmatic BuildUp call.
-            s = ConvertEnvironment(s, "cases", body => "{■(" + NormalizeRows(body) + ")");
-            s = ConvertEnvironment(s, "matrix", body => "■(" + NormalizeRows(body) + ")");
-            s = ConvertEnvironment(s, "pmatrix", body => "(■(" + NormalizeRows(body) + "))");
-            s = ConvertEnvironment(s, "bmatrix", body => "[■(" + NormalizeRows(body) + ")]");
+            // Word's linear equation grammar has a dedicated cases structure. Keeping
+            // the \case token is more reliable than synthesizing an unmatched left brace
+            // around a black-square matrix token, which BuildUp can leave as literal text.
+            s = ConvertEnvironment(s, "cases", body => "\\case(" + NormalizeRows(body) + ")");
+            s = ConvertEnvironment(s, "matrix", body => "\\matrix(" + NormalizeRows(body) + ")");
+            s = ConvertEnvironment(s, "pmatrix", body => "(\\matrix(" + NormalizeRows(body) + "))");
+            s = ConvertEnvironment(s, "bmatrix", body => "[\\matrix(" + NormalizeRows(body) + ")]");
 
-            // Make one-character subscripts/superscripts explicit before a following
-            // parenthesized function argument: f_2(x) -> f_{2}(x), log_3(x) -> log_{3}(x).
-            s = Regex.Replace(s, @"_([A-Za-z0-9])(?=\s*\()", "_{$1}");
-            s = Regex.Replace(s, @"\^([A-Za-z0-9])(?=\s*\()", "^{$1}");
+            // Critical Word parser separator: f_2(x) and log_3(x) can be interpreted as
+            // if the following parenthesized argument belongs to the subscript. Insert a
+            // parser-only space after the script. In Professional format that separator
+            // does not render as a visible mathematical space.
+            s = Regex.Replace(
+                s,
+                @"\b(log|ln|sin|cos|tan|cot|[fFgGhHP])_\{?([A-Za-z0-9]+)\}?\s*\(",
+                "$1_$2 (");
+
+            // Make remaining one-character scripts explicit before other constructs.
+            s = Regex.Replace(s, @"_([A-Za-z0-9])(?=\s*\()", "_$1 ");
+            s = Regex.Replace(s, @"\^([A-Za-z0-9])(?=\s*\()", "^$1 ");
 
             // Normalize OCR spacing without changing mathematical tokens.
             s = Regex.Replace(s, @"[ \t]+", " ").Trim();
@@ -87,7 +95,7 @@ namespace WordGeminiFormula.AddIn.Word
         {
             string s = body ?? string.Empty;
             s = s.Replace("\\\\", "@");
-            return Regex.Replace(s, @"\s*@\s*", " @ ").Trim();
+            return Regex.Replace(s, @"\s*@\s*", "@").Trim();
         }
 
         private static string ReplaceUnaryBraced(string input, string command, Func<string, string> projector)
