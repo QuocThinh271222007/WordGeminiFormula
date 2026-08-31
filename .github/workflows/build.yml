@@ -25,9 +25,7 @@ jobs:
           $realSet = [string][char]0x211D
           $cases = @(
             @{ Input = '\mathbbR'; MustContain = $realSet; Name = 'real-number set repair' },
-            @{ Input = '\overrightarrowAB'; MustContain = '\vec'; Name = 'vector repair' },
-            @{ Input = '\frac{x^2+1}{x-1}'; MustContain = '/'; Name = 'fraction conversion' },
-            @{ Input = '\begin{cases}x+y<3\\x-y+1>0\end{cases}'; MustContain = '\matrix'; Name = 'cases conversion' }
+            @{ Input = '\frac{x^2+1}{x-1}'; MustContain = '/'; Name = 'fraction conversion' }
           )
           foreach ($case in $cases) {
             $actual = $converter.Convert($case.Input)
@@ -36,6 +34,30 @@ jobs:
             }
             Write-Host "PASS $($case.Name): $actual"
           }
+      - name: Word math canonicalizer regression smoke test
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dll = (Resolve-Path 'src/WordGeminiFormula.AddIn/bin/Release/net48/WordGeminiFormula.AddIn.dll').Path
+          Add-Type -Path $dll
+          $c = New-Object WordGeminiFormula.AddIn.Word.WordMathCanonicalizer
+          $realSet = [string][char]0x211D
+          $vectorAccent = [string][char]0x20D7
+          $matrixToken = [string][char]0x25A0
+
+          $integral = $c.NormalizeForWord('\int f(x) \mathrm{d}x = \sin x + C')
+          if (-not $integral.Contains('∫') -or -not $integral.Contains('sin') -or $integral.Contains('\int') -or $integral.Contains('\mathrm')) {
+            throw "Integral canonicalization failed: $integral"
+          }
+          $log = $c.NormalizeForWord('\log_3(x-1)=1')
+          if (-not $log.StartsWith('log')) { throw "Log canonicalization failed: $log" }
+          $vector = $c.NormalizeForWord('\overrightarrow{AB}')
+          if (-not $vector.Contains($vectorAccent) -or $vector.Contains('\vec')) { throw "Vector canonicalization failed: $vector" }
+          $system = $c.NormalizeForWord('\begin{cases}x+y<3\\x-y+1>0\end{cases}')
+          if (-not $system.Contains($matrixToken) -or $system.Contains('\begin')) { throw "Cases canonicalization failed: $system" }
+          $set = $c.NormalizeForWord('\mathbb{R}')
+          if (-not $set.Contains($realSet)) { throw "Set canonicalization failed: $set" }
+          Write-Host 'PASS Word-safe integral/log/vector/cases/set canonicalization.' -ForegroundColor Green
       - name: Word range safety regression guard
         shell: pwsh
         run: |
@@ -46,21 +68,25 @@ jobs:
             throw 'Unsafe flattened-text Word Range normalization has returned.'
           }
           Write-Host 'PASS legacy service has no flattened-text offset normalization.' -ForegroundColor Green
-      - name: Bookmark renderer regression guard
+      - name: Bookmark and V4 renderer regression guard
         shell: pwsh
         run: |
           $connect = Get-Content 'src/WordGeminiFormula.AddIn/Connect.cs' -Raw
           $safe = Get-Content 'src/WordGeminiFormula.AddIn/Word/WordDocumentServiceV3.cs' -Raw
-          if ($connect -notmatch 'new\s+WordDocumentServiceV3\(') {
-            throw 'Connect is not routed through WordDocumentServiceV3.'
+          $v4 = Get-Content 'src/WordGeminiFormula.AddIn/Word/WordDocumentServiceV4.cs' -Raw
+          if ($connect -notmatch 'new\s+WordDocumentServiceV4\(') {
+            throw 'Connect is not routed through WordDocumentServiceV4.'
           }
           if ($safe -match 'ContentControls\.Add|WdContentControlRichText') {
-            throw 'V3 renderer must not create Content Controls; they create limited editing zones.'
+            throw 'V3 bookmark renderer must not create Content Controls.'
           }
           if ($safe -notmatch 'Bookmarks\.Add' -or $safe -notmatch 'PendingMathBookmarkPrefix' -or $safe -notmatch 'OrderByDescending') {
             throw 'Non-locking bookmark math tracking safeguards are missing.'
           }
-          Write-Host 'PASS active OCR renderer tracks pending math with non-locking Word bookmarks.' -ForegroundColor Green
+          if ($v4 -notmatch 'SplitAtFirstNewline' -or $v4 -notmatch 'SetPrimaryFooter' -or $v4 -notmatch 'ApplyCompactExamLayout') {
+            throw 'V4 visual anchoring / footer / compact exam safeguards are missing.'
+          }
+          Write-Host 'PASS active V4 renderer uses bookmark-safe math, anchored visuals and compact exam layout.' -ForegroundColor Green
       - name: Deferred Word math render regression guard
         shell: pwsh
         run: |
