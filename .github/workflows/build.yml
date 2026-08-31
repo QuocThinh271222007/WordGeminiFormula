@@ -15,6 +15,28 @@ jobs:
       - name: Restore and build
         shell: pwsh
         run: msbuild WordGeminiFormula.sln /t:Restore,Build /p:Configuration=Release /p:Platform="Any CPU"
+      - name: COM activation smoke test
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dll = (Resolve-Path 'src/WordGeminiFormula.AddIn/bin/Release/net48/WordGeminiFormula.AddIn.dll').Path
+          & .\scripts\install.ps1 -DllPath $dll
+          try {
+            $type = [Type]::GetTypeFromProgID('WordGeminiFormula.AddIn', $true)
+            $addin = [Activator]::CreateInstance($type)
+            if ($null -eq $addin) { throw 'COM activation returned null.' }
+            $xml = $addin.GetCustomUI('Microsoft.Word.Document')
+            if ([string]::IsNullOrWhiteSpace($xml) -or $xml -notmatch '<customUI') {
+              throw 'GetCustomUI did not return Ribbon XML.'
+            }
+            Write-Host 'COM activation and GetCustomUI smoke test passed.' -ForegroundColor Green
+          }
+          finally {
+            if ($null -ne $addin -and [Runtime.InteropServices.Marshal]::IsComObject($addin)) {
+              [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($addin)
+            }
+            & .\scripts\uninstall.ps1
+          }
       - name: Stage package
         shell: pwsh
         run: |
