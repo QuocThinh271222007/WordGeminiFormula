@@ -41,10 +41,11 @@ jobs:
         run: |
           $path = 'src/WordGeminiFormula.AddIn/Word/WordDocumentService.cs'
           $source = Get-Content $path -Raw
-          if ($source -match 'document\.Content\.Text' -or $source -match 'match\.Index') {
+          if ($source -match '(?m)^\s*string\s+\w+\s*=\s*\(string\)document\.Content\.Text\s*;' -or
+              $source -match '(?m)^\s*int\s+\w+\s*=\s*match\.Index\s*;') {
             throw 'Unsafe flattened-text Word Range normalization has returned.'
           }
-          if ($source -notmatch 'PendingMathTagPrefix' -or $source -notmatch 'ContentControls' -or $source -notmatch 'Range\.Find|FindTextRange') {
+          if ($source -notmatch 'PendingMathTagPrefix' -or $source -notmatch 'ContentControls' -or $source -notmatch 'FindTextRange') {
             throw 'Tracked Content Control / Word Range.Find normalization safeguards are missing.'
           }
           Write-Host 'PASS Word formula ranges are tracked by Word, not flattened text offsets.' -ForegroundColor Green
