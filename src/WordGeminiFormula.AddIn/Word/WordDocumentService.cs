@@ -4,7 +4,6 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
-using System.Text;
 using System.Text.RegularExpressions;
 using WordGeminiFormula.AddIn.Models;
 
@@ -17,6 +16,11 @@ namespace WordGeminiFormula.AddIn.Word
         private readonly MathRepairService _repair = new MathRepairService();
         private const string MathStart = "[[MATH]]";
         private const string MathEnd = "[[/MATH]]";
+        private const string PendingMathTagPrefix = "WGF_MATH_PENDING_";
+        private const int WdContentControlRichText = 0;
+        private const int WdCollapseStart = 1;
+        private const int WdFindStop = 0;
+        private const int WdYellow = 7;
 
         public int LastNormalizationFailureCount { get; private set; }
 
@@ -35,6 +39,7 @@ namespace WordGeminiFormula.AddIn.Word
             if (document?.blocks == null) return;
             dynamic selection = _wordApplication.Selection;
             selection.Collapse(0); // wdCollapseEnd
+            LastNormalizationFailureCount = 0;
 
             if (autoBeautify)
                 ApplyPageDefaults(_wordApplication.ActiveDocument);
@@ -73,10 +78,10 @@ namespace WordGeminiFormula.AddIn.Word
                         InsertStyledParagraph(block.text, 0, true, 11.5f, 4f, 6f);
                         break;
                     case "question":
-                        InsertQuestion(block, autoBeautify);
+                        InsertQuestion(block, autoBeautify, autoNormalize);
                         break;
                     case "formula":
-                        InsertStandaloneFormula(block);
+                        InsertStandaloneFormula(block, autoNormalize);
                         break;
                     case "figure":
                     case "table_image":
@@ -91,9 +96,6 @@ namespace WordGeminiFormula.AddIn.Word
                         break;
                 }
             }
-
-            if (autoNormalize)
-                NormalizeAllMarkedFormulas();
         }
 
         public int BeautifyActiveDocument()
@@ -182,38 +184,34 @@ namespace WordGeminiFormula.AddIn.Word
             return formatted;
         }
 
+        /// <summary>
+        /// Normalizes formulas using Word-tracked Content Controls. New OCR output never
+        /// derives Word Range coordinates from document.Content.Text. A Word Find based
+        /// fallback remains only for legacy/pasted [[MATH]] markers that have no control.
+        /// </summary>
         public int NormalizeAllMarkedFormulas()
         {
             dynamic document = _wordApplication.ActiveDocument;
-            string fullText = (string)document.Content.Text;
-            var regex = new Regex(@"\[\[MATH\]\](.*?)\[\[/MATH\]\]", RegexOptions.Singleline);
-            MatchCollection matches = regex.Matches(fullText);
-
+            LastNormalizationFailureCount = 0;
             int converted = 0;
-            int failed = 0;
-            for (int i = matches.Count - 1; i >= 0; i--)
+
+            // Process tracked controls backwards because successful conversion removes them.
+            dynamic controls = document.ContentControls;
+            for (int i = (int)controls.Count; i >= 1; i--)
             {
-                Match match = matches[i];
-                int start = match.Index;
-                int end = match.Index + match.Length;
-                dynamic range = document.Range(start, end);
-                string latex = _repair.RepairLatex(match.Groups[1].Value.Trim());
-                try
-                {
-                    string linear = _converter.Convert(latex);
-                    if (string.IsNullOrWhiteSpace(linear))
-                        throw new InvalidOperationException("Biểu thức rỗng sau khi chuyển đổi.");
-                    ReplaceRangeWithEquation(range, linear);
+                dynamic control = controls.Item(i);
+                string tag = SafeString(control.Tag);
+                if (!tag.StartsWith(PendingMathTagPrefix, StringComparison.Ordinal)) continue;
+
+                if (TryNormalizePendingControl(control))
                     converted++;
-                }
-                catch
-                {
-                    range.HighlightColorIndex = 7; // wdYellow
-                    failed++;
-                }
+                else
+                    LastNormalizationFailureCount++;
             }
 
-            LastNormalizationFailureCount = failed;
+            // Support documents created by older builds or formulas pasted manually.
+            // This searches with Word Range.Find, so its coordinates remain Word-native.
+            converted += NormalizeLegacyMarkersWithWordFind();
             return converted;
         }
 
@@ -224,13 +222,14 @@ namespace WordGeminiFormula.AddIn.Word
                 throw new InvalidOperationException("Hãy bôi đen công thức LaTeX/linear cần chuẩn hóa trước.");
 
             string raw = ((string)selection.Text ?? string.Empty).Trim();
-            raw = raw.Replace(MathStart, string.Empty).Replace(MathEnd, string.Empty).Trim();
+            raw = ExtractMathPayload(raw);
             if (string.IsNullOrWhiteSpace(raw))
                 throw new InvalidOperationException("Vùng chọn không có công thức.");
 
-            string linear = _converter.Convert(_repair.RepairLatex(raw));
+            string linear = ConvertToWordLinear(raw, null);
             dynamic range = selection.Range;
-            ReplaceRangeWithEquation(range, linear);
+            int end = ReplaceRangeWithEquation(range, linear);
+            selection.SetRange(end, end);
         }
 
         private void InsertHeaderPair(OcrBlock left, OcrBlock right)
@@ -287,15 +286,20 @@ namespace WordGeminiFormula.AddIn.Word
             selection.TypeParagraph();
         }
 
-        private void InsertQuestion(OcrBlock block, bool beautify)
+        private void InsertQuestion(OcrBlock block, bool beautify, bool autoNormalize)
         {
             dynamic document = _wordApplication.ActiveDocument;
             dynamic selection = _wordApplication.Selection;
             ResetSelectionStyle(selection);
             int paragraphStart = (int)selection.Start;
             string prefix = string.IsNullOrWhiteSpace(block.number) ? "" : "Câu " + block.number.Trim() + ". ";
-            string body = block.content != null && block.content.Count > 0 ? RenderInline(block.content) : (block.text ?? string.Empty);
-            selection.TypeText(prefix + body);
+            selection.TypeText(prefix);
+
+            if (block.content != null && block.content.Count > 0)
+                InsertInlineParts(block.content, autoNormalize);
+            else
+                selection.TypeText(block.text ?? string.Empty);
+
             int paragraphEnd = (int)selection.End;
             if (!string.IsNullOrEmpty(prefix))
             {
@@ -309,12 +313,12 @@ namespace WordGeminiFormula.AddIn.Word
 
             if (block.choices == null || block.choices.Count == 0) return;
             if (beautify && block.choices.Count >= 2)
-                InsertChoiceTable(block.choices);
+                InsertChoiceTable(block.choices, autoNormalize);
             else
-                InsertChoiceParagraphs(block.choices);
+                InsertChoiceParagraphs(block.choices, autoNormalize);
         }
 
-        private void InsertChoiceTable(List<OcrChoice> choices)
+        private void InsertChoiceTable(List<OcrChoice> choices, bool autoNormalize)
         {
             dynamic document = _wordApplication.ActiveDocument;
             dynamic selection = _wordApplication.Selection;
@@ -331,13 +335,18 @@ namespace WordGeminiFormula.AddIn.Word
                 OcrChoice choice = choices[i];
                 string label = string.IsNullOrWhiteSpace(choice?.label) ? ((char)('A' + i)).ToString() : choice.label.Trim();
                 dynamic cell = table.Cell(row, col);
-                dynamic range = cell.Range;
-                string value = label + ". " + RenderInline(choice?.content);
-                range.Text = value;
-                range.Font.Name = "Times New Roman";
-                range.Font.Size = 11.5f;
-                range.ParagraphFormat.SpaceAfter = 1f;
-                dynamic labelRange = document.Range((int)range.Start, Math.Min((int)range.Start + label.Length + 1, (int)range.End));
+                int cellStart = (int)cell.Range.Start;
+                int cellEnd = Math.Max(cellStart, (int)cell.Range.End - 1); // exclude end-of-cell marker
+
+                selection.SetRange(cellStart, cellEnd);
+                selection.Text = string.Empty;
+                selection.SetRange(cellStart, cellStart);
+                ResetSelectionStyle(selection);
+                selection.ParagraphFormat.SpaceAfter = 1f;
+                selection.TypeText(label + ". ");
+                InsertInlineParts(choice?.content, autoNormalize);
+
+                dynamic labelRange = document.Range(cellStart, cellStart + label.Length + 1);
                 labelRange.Font.Bold = 1;
             }
 
@@ -345,7 +354,7 @@ namespace WordGeminiFormula.AddIn.Word
             selection.TypeParagraph();
         }
 
-        private void InsertChoiceParagraphs(List<OcrChoice> choices)
+        private void InsertChoiceParagraphs(List<OcrChoice> choices, bool autoNormalize)
         {
             dynamic document = _wordApplication.ActiveDocument;
             dynamic selection = _wordApplication.Selection;
@@ -355,51 +364,252 @@ namespace WordGeminiFormula.AddIn.Word
                 string label = string.IsNullOrWhiteSpace(choice?.label) ? ((char)('A' + i)).ToString() : choice.label.Trim();
                 ResetSelectionStyle(selection);
                 int start = (int)selection.Start;
-                selection.TypeText(label + ". " + RenderInline(choice?.content));
+                selection.TypeText(label + ". ");
+                InsertInlineParts(choice?.content, autoNormalize);
                 dynamic prefix = document.Range(start, start + label.Length + 1);
                 prefix.Font.Bold = 1;
                 selection.TypeParagraph();
             }
         }
 
-        private void InsertStandaloneFormula(OcrBlock block)
+        private void InsertStandaloneFormula(OcrBlock block, bool autoNormalize)
         {
             dynamic selection = _wordApplication.Selection;
             ResetSelectionStyle(selection);
             selection.ParagraphFormat.Alignment = block.display ? 1 : 0;
-            string source = !string.IsNullOrWhiteSpace(block.latex) ? block.latex : block.word_linear;
-            selection.TypeText(MathStart + _repair.RepairLatex(source ?? string.Empty) + MathEnd);
+            InsertMathFragment(block.latex, block.word_linear, autoNormalize);
             selection.TypeParagraph();
         }
 
-        private string RenderInline(IEnumerable<OcrInline> parts)
+        private void InsertInlineParts(IEnumerable<OcrInline> parts, bool autoNormalize)
         {
-            if (parts == null) return string.Empty;
-            var sb = new StringBuilder();
+            if (parts == null) return;
+            dynamic selection = _wordApplication.Selection;
             bool previousWasMath = false;
+
             foreach (OcrInline part in parts)
             {
                 if (part == null) continue;
                 bool isMath = string.Equals(part.type, "math", StringComparison.OrdinalIgnoreCase) ||
                               string.Equals(part.type, "formula", StringComparison.OrdinalIgnoreCase);
+
                 if (isMath)
                 {
-                    if (sb.Length > 0 && !char.IsWhiteSpace(sb[sb.Length - 1]) && "([{".IndexOf(sb[sb.Length - 1]) < 0)
-                        sb.Append(' ');
-                    string source = !string.IsNullOrWhiteSpace(part.latex) ? part.latex : part.word_linear;
-                    sb.Append(MathStart).Append(_repair.RepairLatex(source ?? string.Empty)).Append(MathEnd);
+                    InsertMathFragment(part.latex, part.word_linear, autoNormalize);
                     previousWasMath = true;
                 }
                 else
                 {
                     string text = part.text ?? string.Empty;
                     if (previousWasMath && text.Length > 0 && !char.IsWhiteSpace(text[0]) && !IsNoLeadingSpacePunctuation(text[0]))
-                        sb.Append(' ');
-                    sb.Append(text);
+                        selection.TypeText(" ");
+                    selection.TypeText(text);
                     previousWasMath = false;
                 }
             }
-            return sb.ToString();
+        }
+
+        private void InsertMathFragment(string latex, string wordLinear, bool autoNormalize)
+        {
+            dynamic document = _wordApplication.ActiveDocument;
+            dynamic selection = _wordApplication.Selection;
+            string repairedLatex = _repair.RepairLatex(!string.IsNullOrWhiteSpace(latex) ? latex : wordLinear ?? string.Empty);
+
+            if (string.IsNullOrWhiteSpace(repairedLatex))
+            {
+                InsertPendingMathControl("[OCR_MATH_EMPTY]", true);
+                LastNormalizationFailureCount++;
+                return;
+            }
+
+            if (!autoNormalize)
+            {
+                InsertPendingMathControl(repairedLatex, false);
+                return;
+            }
+
+            string linear;
+            try
+            {
+                linear = ConvertToWordLinear(repairedLatex, wordLinear);
+            }
+            catch
+            {
+                InsertPendingMathControl(repairedLatex, true);
+                LastNormalizationFailureCount++;
+                return;
+            }
+
+            int start = (int)selection.Start;
+            selection.TypeText(linear);
+            int end = (int)selection.End;
+            dynamic range = document.Range(start, end);
+            try
+            {
+                int equationEnd = ConvertExistingRangeToEquation(range);
+                selection.SetRange(equationEnd, equationEnd);
+            }
+            catch
+            {
+                // Word rejected the equation. Restore a tracked marker exactly at this
+                // local range instead of attempting any document-global coordinate math.
+                dynamic restore = document.Range(start, Math.Max(start, end));
+                restore.Text = string.Empty;
+                selection.SetRange(start, start);
+                InsertPendingMathControl(repairedLatex, true);
+                LastNormalizationFailureCount++;
+            }
+        }
+
+        private void InsertPendingMathControl(string latex, bool highlight)
+        {
+            dynamic document = _wordApplication.ActiveDocument;
+            dynamic selection = _wordApplication.Selection;
+            string payload = _repair.RepairLatex(latex ?? string.Empty);
+            string marker = MathStart + payload + MathEnd;
+            int start = (int)selection.Start;
+            selection.TypeText(marker);
+            int end = (int)selection.End;
+            dynamic range = document.Range(start, end);
+
+            try
+            {
+                dynamic control = document.ContentControls.Add(WdContentControlRichText, range);
+                control.Tag = PendingMathTagPrefix + Guid.NewGuid().ToString("N");
+                control.Title = "Word Gemini Formula - pending math";
+                if (highlight) control.Range.HighlightColorIndex = WdYellow;
+                selection.SetRange((int)control.Range.End, (int)control.Range.End);
+            }
+            catch
+            {
+                // Content Controls can be blocked by some protected documents. Keep the
+                // marker in place and highlight it; legacy Word Find normalization can
+                // still process it without flattened-string offsets.
+                if (highlight) range.HighlightColorIndex = WdYellow;
+                selection.SetRange((int)range.End, (int)range.End);
+            }
+        }
+
+        private bool TryNormalizePendingControl(dynamic control)
+        {
+            dynamic document = _wordApplication.ActiveDocument;
+            dynamic controlRange = control.Range;
+            string raw = ExtractMathPayload((string)controlRange.Text ?? string.Empty);
+            int start = (int)controlRange.Start;
+            int end = (int)controlRange.End;
+
+            try
+            {
+                string linear = ConvertToWordLinear(raw, null);
+                control.Delete(false); // remove wrapper, preserve marker text until replacement
+                dynamic range = document.Range(start, end);
+                ReplaceRangeWithEquation(range, linear);
+                return true;
+            }
+            catch
+            {
+                try { control.Range.HighlightColorIndex = WdYellow; } catch { }
+                return false;
+            }
+        }
+
+        private int NormalizeLegacyMarkersWithWordFind()
+        {
+            dynamic document = _wordApplication.ActiveDocument;
+            int converted = 0;
+            int cursor = 0;
+
+            while (cursor < (int)document.Content.End)
+            {
+                dynamic startMarker = FindTextRange(document, MathStart, cursor);
+                if (startMarker == null) break;
+
+                // New-build markers inside tracked controls were already handled above.
+                try
+                {
+                    if ((int)startMarker.ContentControls.Count > 0)
+                    {
+                        cursor = Math.Max(cursor + 1, (int)startMarker.End);
+                        continue;
+                    }
+                }
+                catch { }
+
+                dynamic endMarker = FindTextRange(document, MathEnd, (int)startMarker.End);
+                if (endMarker == null)
+                {
+                    startMarker.HighlightColorIndex = WdYellow;
+                    LastNormalizationFailureCount++;
+                    break;
+                }
+
+                int fullStart = (int)startMarker.Start;
+                int fullEnd = (int)endMarker.End;
+                dynamic payloadRange = document.Range((int)startMarker.End, (int)endMarker.Start);
+                string raw = ((string)payloadRange.Text ?? string.Empty).Trim();
+                dynamic fullRange = document.Range(fullStart, fullEnd);
+
+                try
+                {
+                    string linear = ConvertToWordLinear(raw, null);
+                    cursor = ReplaceRangeWithEquation(fullRange, linear);
+                    converted++;
+                }
+                catch
+                {
+                    fullRange.HighlightColorIndex = WdYellow;
+                    LastNormalizationFailureCount++;
+                    cursor = Math.Max(fullStart + 1, fullEnd);
+                }
+            }
+
+            return converted;
+        }
+
+        private static dynamic FindTextRange(dynamic document, string needle, int start)
+        {
+            int documentEnd = (int)document.Content.End;
+            if (start >= documentEnd) return null;
+            dynamic range = document.Range(Math.Max(0, start), documentEnd);
+            dynamic find = range.Find;
+            find.ClearFormatting();
+            find.Text = needle;
+            find.Forward = true;
+            find.Wrap = WdFindStop;
+            find.Format = false;
+            bool found = find.Execute();
+            return found ? range : null;
+        }
+
+        private string ConvertToWordLinear(string latex, string preferredWordLinear)
+        {
+            if (!string.IsNullOrWhiteSpace(preferredWordLinear))
+            {
+                string preferred = _repair.RepairWordLinear(preferredWordLinear);
+                if (!string.IsNullOrWhiteSpace(preferred)) return preferred;
+            }
+
+            string repaired = _repair.RepairLatex(latex ?? string.Empty);
+            string linear = _converter.Convert(repaired);
+            if (string.IsNullOrWhiteSpace(linear))
+                throw new InvalidOperationException("Biểu thức rỗng sau khi chuyển đổi.");
+            return linear;
+        }
+
+        private static string ExtractMathPayload(string value)
+        {
+            string raw = (value ?? string.Empty).Trim();
+            if (raw.StartsWith(MathStart, StringComparison.Ordinal) && raw.EndsWith(MathEnd, StringComparison.Ordinal))
+                raw = raw.Substring(MathStart.Length, raw.Length - MathStart.Length - MathEnd.Length);
+            else
+                raw = raw.Replace(MathStart, string.Empty).Replace(MathEnd, string.Empty);
+            return raw.Trim();
+        }
+
+        private static string SafeString(object value)
+        {
+            try { return Convert.ToString(value) ?? string.Empty; }
+            catch { return string.Empty; }
         }
 
         private static bool IsNoLeadingSpacePunctuation(char c)
@@ -437,7 +647,7 @@ namespace WordGeminiFormula.AddIn.Word
             selection.TypeText("[CẦN KIỂM TRA: " + reason + "]");
             int end = (int)selection.End;
             dynamic range = _wordApplication.ActiveDocument.Range(start, end);
-            range.HighlightColorIndex = 7;
+            range.HighlightColorIndex = WdYellow;
             range.Font.Italic = 1;
             selection.TypeParagraph();
         }
@@ -537,19 +747,25 @@ namespace WordGeminiFormula.AddIn.Word
             catch { }
         }
 
-        private void ReplaceRangeWithEquation(dynamic range, string wordLinear)
+        private int ReplaceRangeWithEquation(dynamic range, string wordLinear)
+        {
+            int start = (int)range.Start;
+            string linear = wordLinear ?? string.Empty;
+            range.Text = linear;
+            dynamic exactRange = _wordApplication.ActiveDocument.Range(start, start + linear.Length);
+            return ConvertExistingRangeToEquation(exactRange);
+        }
+
+        private int ConvertExistingRangeToEquation(dynamic range)
         {
             dynamic document = _wordApplication.ActiveDocument;
-            int start = (int)range.Start;
-            range.Text = wordLinear ?? string.Empty;
-            int end = (int)range.End;
-            dynamic eqInput = document.Range(start, end);
-            dynamic eqRange = document.OMaths.Add(eqInput);
-            if ((int)eqRange.OMaths.Count > 0)
-            {
-                dynamic equation = eqRange.OMaths.Item(1);
-                equation.BuildUp();
-            }
+            dynamic eqRange = document.OMaths.Add(range);
+            if ((int)eqRange.OMaths.Count <= 0)
+                throw new InvalidOperationException("Word không tạo được OMath từ biểu thức.");
+
+            dynamic equation = eqRange.OMaths.Item(1);
+            equation.BuildUp();
+            return (int)eqRange.End;
         }
     }
 }
