@@ -14,11 +14,13 @@ namespace WordGeminiFormula.AddIn.Word
             if (string.IsNullOrWhiteSpace(value)) return string.Empty;
             string s = value.Trim();
 
-            s = Regex.Replace(s, @"\\mathbb\s*R\b", @"\\mathbb{R}");
-            s = Regex.Replace(s, @"\\mathbb\s*N\b", @"\\mathbb{N}");
-            s = Regex.Replace(s, @"\\mathbb\s*Z\b", @"\\mathbb{Z}");
-            s = Regex.Replace(s, @"\\mathbb\s*Q\b", @"\\mathbb{Q}");
-            s = Regex.Replace(s, @"\\mathbb\s*C\b", @"\\mathbb{C}");
+            // Regex replacement strings do not need the pattern-level escaping
+            // used to match a literal backslash. Emit exactly one LaTeX slash.
+            s = Regex.Replace(s, @"\\mathbb\s*R\b", @"\mathbb{R}");
+            s = Regex.Replace(s, @"\\mathbb\s*N\b", @"\mathbb{N}");
+            s = Regex.Replace(s, @"\\mathbb\s*Z\b", @"\mathbb{Z}");
+            s = Regex.Replace(s, @"\\mathbb\s*Q\b", @"\mathbb{Q}");
+            s = Regex.Replace(s, @"\\mathbb\s*C\b", @"\mathbb{C}");
 
             s = RepairUnaryCommandBody(s, "overrightarrow");
             s = RepairUnaryCommandBody(s, "overleftarrow");
