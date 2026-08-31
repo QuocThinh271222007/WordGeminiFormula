@@ -16,13 +16,13 @@ if ([string]::IsNullOrWhiteSpace($DllPath)) {
         $DllPath = $sourceDll
     }
     else {
-        throw "Không tìm thấy WordGeminiFormula.AddIn.dll. Nếu bạn dùng source, hãy build Release trước. Nếu dùng artifact, hãy giải nén toàn bộ ZIP và giữ DLL cùng thư mục với install.ps1."
+        throw 'WordGeminiFormula.AddIn.dll was not found. Build Release first when using source, or extract the complete artifact ZIP and keep the DLL next to install.ps1.'
     }
 }
 
 $DllPath = [System.IO.Path]::GetFullPath($DllPath)
 if (-not (Test-Path $DllPath)) {
-    throw "Không tìm thấy DLL: $DllPath"
+    throw "DLL not found: $DllPath"
 }
 
 $clsid = '{7BA1B881-3DA4-4FBA-A25D-5F92141658EE}'
@@ -58,6 +58,6 @@ New-ItemProperty -Path $addinPath -Name 'Description' -Value 'Gemini OCR and nat
 New-ItemProperty -Path $addinPath -Name 'LoadBehavior' -Value 3 -PropertyType DWord -Force | Out-Null
 New-ItemProperty -Path $addinPath -Name 'CommandLineSafe' -Value 0 -PropertyType DWord -Force | Out-Null
 
-Write-Host 'Đã đăng ký Word Gemini Formula cho user hiện tại.' -ForegroundColor Green
+Write-Host 'Word Gemini Formula was registered for the current Windows user.' -ForegroundColor Green
 Write-Host "DLL: $DllPath"
-Write-Host 'Đóng toàn bộ Word rồi mở lại. Ribbon mới có tên: AI Formula.'
+Write-Host 'Close all Word windows and reopen Word. Ribbon tab: AI Formula.'
