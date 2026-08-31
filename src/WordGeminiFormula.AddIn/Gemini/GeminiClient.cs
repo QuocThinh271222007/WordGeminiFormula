@@ -21,7 +21,7 @@ namespace WordGeminiFormula.AddIn.Gemini
             return new HttpClient { Timeout = TimeSpan.FromSeconds(120) };
         }
 
-        public OcrDocument OcrImage(string apiKey, string model, string imagePath)
+        public OcrDocument OcrImage(string apiKey, string model, string imagePath, string documentPreset = null)
         {
             ValidateConfiguration(apiKey, model);
             if (string.IsNullOrWhiteSpace(imagePath) || !File.Exists(imagePath))
@@ -32,6 +32,7 @@ namespace WordGeminiFormula.AddIn.Gemini
                 throw new InvalidOperationException("Ảnh quá lớn cho chế độ inline. Giới hạn hiện tại là 18 MB.");
 
             string mimeType = GetMimeType(imagePath);
+            string prompt = BuildPrompt(documentPreset);
             var request = new
             {
                 contents = new[]
@@ -41,7 +42,7 @@ namespace WordGeminiFormula.AddIn.Gemini
                         role = "user",
                         parts = new object[]
                         {
-                            new { text = OcrPrompt },
+                            new { text = prompt },
                             new
                             {
                                 inlineData = new
@@ -97,6 +98,15 @@ namespace WordGeminiFormula.AddIn.Gemini
             }
         }
 
+        private static string BuildPrompt(string documentPreset)
+        {
+            string preset = string.IsNullOrWhiteSpace(documentPreset)
+                ? "auto"
+                : documentPreset.Trim().ToLowerInvariant();
+            return OcrPrompt + "\n\nUSER DOCUMENT PRESET: " + preset +
+                   "\nIf preset is exam, prioritize the exam-specific block rules. If preset is general, preserve layout but do not force exam semantics. If preset is auto, infer the document type from the image.";
+        }
+
         private static void NormalizeDocument(OcrDocument doc)
         {
             doc.document_type = (doc.document_type ?? "general").Trim().ToLowerInvariant();
@@ -116,8 +126,6 @@ namespace WordGeminiFormula.AddIn.Gemini
                 foreach (var part in block.content.Where(p => p != null))
                 {
                     part.type = (part.type ?? "text").Trim().ToLowerInvariant();
-                    // Do not Trim inline prose: leading/trailing spaces carry the
-                    // boundary between prose and an adjacent formula fragment.
                     part.text = part.text ?? string.Empty;
                     part.latex = part.latex?.Trim();
                     part.word_linear = part.word_linear?.Trim();
