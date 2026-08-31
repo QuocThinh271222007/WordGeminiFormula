@@ -1,20 +1,21 @@
 using System;
-using System.Text;
 using System.Text.RegularExpressions;
 
 namespace WordGeminiFormula.AddIn.Word
 {
     /// <summary>
     /// Conservative LaTeX -> Word UnicodeMath converter for common school/university formulas.
-    /// It intentionally leaves unknown commands intact so Word Math AutoCorrect can still handle them.
+    /// Unknown commands are intentionally left intact so Word Math AutoCorrect can still handle them.
     /// </summary>
     public sealed class LatexToUnicodeMathConverter
     {
+        private readonly MathRepairService _repair = new MathRepairService();
+
         public string Convert(string latex)
         {
             if (string.IsNullOrWhiteSpace(latex)) return string.Empty;
 
-            string s = latex.Trim();
+            string s = _repair.RepairLatex(latex);
             s = Regex.Replace(s, @"^\$\$?|\$\$?$", string.Empty).Trim();
             s = s.Replace("\\displaystyle", string.Empty)
                  .Replace("\\left", string.Empty)
@@ -28,6 +29,8 @@ namespace WordGeminiFormula.AddIn.Word
             s = ConvertFunctions(s);
             s = ConvertFractions(s);
             s = ConvertRoots(s);
+            s = ConvertUnaryBracedCommand(s, "overrightarrow", body => "(" + body + ")\\vec");
+            s = ConvertUnaryBracedCommand(s, "overleftarrow", body => "(" + body + ")\\vec");
             s = ConvertUnaryBracedCommand(s, "vec", body => "(" + body + ")\\vec");
             s = ConvertUnaryBracedCommand(s, "hat", body => "(" + body + ")\\hat");
             s = ConvertUnaryBracedCommand(s, "bar", body => "\\overbar(" + body + ")");
@@ -35,13 +38,21 @@ namespace WordGeminiFormula.AddIn.Word
             s = ConvertUnaryBracedCommand(s, "underline", body => "\\underbar(" + body + ")");
             s = ConvertText(s);
             s = NormalizeBracedScripts(s);
-            s = s.Replace("\\rightarrow", "->");
+
+            s = s.Replace("\\mathbb{R}", "ℝ")
+                 .Replace("\\mathbb{N}", "ℕ")
+                 .Replace("\\mathbb{Z}", "ℤ")
+                 .Replace("\\mathbb{Q}", "ℚ")
+                 .Replace("\\mathbb{C}", "ℂ")
+                 .Replace("\\neq", "≠")
+                 .Replace("\\ne", "≠")
+                 .Replace("\\rightarrow", "->");
             s = Regex.Replace(s, @"\\to(?![A-Za-z])", "->");
             s = Regex.Replace(s, @"\\le(?![A-Za-z])", "\\leq");
             s = Regex.Replace(s, @"\\ge(?![A-Za-z])", "\\geq");
 
             s = Regex.Replace(s, @"\s+", " ").Trim();
-            return s;
+            return _repair.RepairWordLinear(s);
         }
 
         private string ConvertFractions(string input)
@@ -111,7 +122,7 @@ namespace WordGeminiFormula.AddIn.Word
             return s;
         }
 
-        private string ConvertFunctions(string input)
+        private static string ConvertFunctions(string input)
         {
             return input
                 .Replace("\\operatorname{sin}", "sin")
@@ -121,7 +132,7 @@ namespace WordGeminiFormula.AddIn.Word
                 .Replace("\\operatorname{log}", "log");
         }
 
-        private string ConvertText(string input)
+        private static string ConvertText(string input)
         {
             string s = input;
             int guard = 0;
@@ -141,7 +152,7 @@ namespace WordGeminiFormula.AddIn.Word
             return s;
         }
 
-        private string NormalizeBracedScripts(string input)
+        private static string NormalizeBracedScripts(string input)
         {
             string s = input;
             s = Regex.Replace(s, @"\^\{([^{}]+)\}", "^($1)");
@@ -152,12 +163,41 @@ namespace WordGeminiFormula.AddIn.Word
         private string ConvertEnvironments(string input)
         {
             string s = input;
+            s = ConvertArrayEnvironment(s);
             s = ConvertMatrixEnvironment(s, "matrix");
             s = ConvertMatrixEnvironment(s, "pmatrix");
             s = ConvertMatrixEnvironment(s, "bmatrix");
             s = ConvertMatrixEnvironment(s, "vmatrix");
             s = ConvertMatrixEnvironment(s, "Vmatrix");
             s = ConvertCasesEnvironment(s);
+            return s;
+        }
+
+        private string ConvertArrayEnvironment(string input)
+        {
+            string s = input;
+            const string beginToken = "\\begin{array}";
+            const string endToken = "\\end{array}";
+            int guard = 0;
+            while (guard++ < 64)
+            {
+                int a = s.IndexOf(beginToken, StringComparison.Ordinal);
+                if (a < 0) break;
+                int bodyStart = a + beginToken.Length;
+                SkipSpaces(s, ref bodyStart);
+                if (bodyStart < s.Length && s[bodyStart] == '{')
+                {
+                    int specEnd = FindMatching(s, bodyStart, '{', '}');
+                    if (specEnd > bodyStart) bodyStart = specEnd + 1;
+                }
+                int b = s.IndexOf(endToken, bodyStart, StringComparison.Ordinal);
+                if (b < 0) break;
+                string body = s.Substring(bodyStart, b - bodyStart)
+                    .Replace("\\hline", string.Empty)
+                    .Replace("\\\\", "@");
+                string replacement = "\\matrix(" + body + ")";
+                s = s.Substring(0, a) + replacement + s.Substring(b + endToken.Length);
+            }
             return s;
         }
 
@@ -185,7 +225,7 @@ namespace WordGeminiFormula.AddIn.Word
             return s;
         }
 
-        private string ConvertCasesEnvironment(string input)
+        private static string ConvertCasesEnvironment(string input)
         {
             const string begin = "\\begin{cases}";
             const string end = "\\end{cases}";
