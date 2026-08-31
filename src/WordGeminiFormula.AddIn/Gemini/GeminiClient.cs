@@ -16,6 +16,14 @@ namespace WordGeminiFormula.AddIn.Gemini
         private static readonly HttpClient Http = CreateHttpClient();
         private readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
 
+        /// <summary>
+        /// Exact structured OCR payload returned by Gemini after removing an optional
+        /// markdown JSON fence and before Word rendering/normalization touches it.
+        /// This is intentionally diagnostic state so OCR defects can be separated
+        /// from Word rendering defects.
+        /// </summary>
+        public string LastRawOcrJson { get; private set; }
+
         private static HttpClient CreateHttpClient()
         {
             return new HttpClient { Timeout = TimeSpan.FromSeconds(120) };
@@ -62,6 +70,8 @@ namespace WordGeminiFormula.AddIn.Gemini
             };
 
             string output = StripJsonFence(Generate(apiKey, model, request));
+            LastRawOcrJson = output;
+
             var doc = _json.Deserialize<OcrDocument>(output);
             if (doc?.blocks == null)
                 throw new InvalidOperationException("Gemini trả về JSON không đúng schema OCR V0.2.");
@@ -232,50 +242,52 @@ CORE REQUIREMENTS
 - Keep mathematical expressions as math fragments, not flattened prose.
 - Preserve spaces at the boundaries of inline text fragments so prose and formulas do not run together.
 - Use standard mathematical notation when the image is visually unambiguous: f(x), g(x), u_n, u_1, P(A), vectors, coordinates, intervals, derivatives, integrals, matrices, cases, logarithm bases, etc.
-- If a symbol is genuinely unclear, keep the most literal reading and lower confidence; do not guess a different problem.
+- Every math fragment must be complete and self-contained. Never split one visible formula across separate math fragments.
+- Never emit OCR control markers such as [[MATH]] in text fields; those markers are owned by the Word renderer.
+- If a symbol or region is genuinely unclear, preserve a larger unresolved/figure/table_image region rather than returning a truncated formula.
 
 DOCUMENT TYPE
-Set document_type to ""exam"" for an exam/test page, otherwise ""general"".
+Set document_type to "exam" for an exam/test page, otherwise "general".
 
 RETURN JSON ONLY. Use this schema:
 {
-  ""document_type"": ""exam"",
-  ""warnings"": [""optional warning""],
-  ""blocks"": [
-    { ""type"": ""header_left"", ""text"": ""multi-line text"" },
-    { ""type"": ""header_right"", ""text"": ""multi-line text"" },
-    { ""type"": ""title"", ""text"": ""..."" },
-    { ""type"": ""subtitle"", ""text"": ""..."" },
-    { ""type"": ""meta"", ""text"": ""..."" },
-    { ""type"": ""candidate_field"", ""label"": ""Họ, tên thí sinh"", ""text"": """" },
-    { ""type"": ""code_box"", ""label"": ""Mã đề"", ""text"": ""0101"" },
-    { ""type"": ""section"", ""text"": ""PHẦN I: ..."" },
+  "document_type": "exam",
+  "warnings": ["optional warning"],
+  "blocks": [
+    { "type": "header_left", "text": "multi-line text" },
+    { "type": "header_right", "text": "multi-line text" },
+    { "type": "title", "text": "..." },
+    { "type": "subtitle", "text": "..." },
+    { "type": "meta", "text": "..." },
+    { "type": "candidate_field", "label": "Họ, tên thí sinh", "text": "" },
+    { "type": "code_box", "label": "Mã đề", "text": "0101" },
+    { "type": "section", "text": "PHẦN I: ..." },
     {
-      ""type"": ""question"",
-      ""number"": ""1"",
-      ""content"": [
-        { ""type"": ""text"", ""text"": ""Cho cấp số cộng "" },
-        { ""type"": ""math"", ""latex"": ""u_n"", ""word_linear"": ""u_n"", ""confidence"": 1.0 },
-        { ""type"": ""text"", ""text"": "" có "" }
+      "type": "question",
+      "number": "1",
+      "content": [
+        { "type": "text", "text": "Cho cấp số cộng " },
+        { "type": "math", "latex": "u_n", "word_linear": "u_n", "confidence": 1.0 },
+        { "type": "text", "text": " có " }
       ],
-      ""choices"": [
-        { ""label"": ""A"", ""content"": [{ ""type"": ""text"", ""text"": ""4."" }] }
+      "choices": [
+        { "label": "A", "content": [{ "type": "text", "text": "4." }] }
       ]
     },
-    { ""type"": ""formula"", ""latex"": ""..."", ""word_linear"": ""..."", ""display"": true },
+    { "type": "formula", "latex": "...", "word_linear": "...", "display": true },
     {
-      ""type"": ""figure"",
-      ""text"": ""short description only"",
-      ""bbox"": { ""x"": 0.1, ""y"": 0.2, ""width"": 0.4, ""height"": 0.3 },
-      ""confidence"": 0.7
+      "type": "figure",
+      "text": "short description only",
+      "bbox": { "x": 0.1, "y": 0.2, "width": 0.4, "height": 0.3 },
+      "confidence": 0.7
     },
     {
-      ""type"": ""table_image"",
-      ""text"": ""variation table / diagram that should be preserved visually"",
-      ""bbox"": { ""x"": 0.1, ""y"": 0.2, ""width"": 0.7, ""height"": 0.2 },
-      ""confidence"": 0.8
+      "type": "table_image",
+      "text": "variation table / diagram that should be preserved visually",
+      "bbox": { "x": 0.1, "y": 0.2, "width": 0.7, "height": 0.2 },
+      "confidence": 0.8
     },
-    { ""type"": ""footer"", ""text"": ""..."" }
+    { "type": "footer", "text": "..." }
   ]
 }
 
