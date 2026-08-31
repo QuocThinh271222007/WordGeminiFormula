@@ -112,13 +112,10 @@ namespace WordGeminiFormula.AddIn
                     var document = _geminiClient.OcrImage(apiKey, settings.model, imagePath, settings.documentPreset);
                     string rawSnapshotPath = SaveRawOcrSnapshot(_geminiClient.LastRawOcrJson);
 
-                    var word = new WordDocumentService(_wordApplication);
+                    var word = new WordDocumentServiceV3(_wordApplication);
 
-                    // Never build Word OMath while the OCR renderer is still typing the page.
-                    // Word can leave Selection inside a math zone after OMath.BuildUp(), and
-                    // subsequent TypeText/TypeParagraph calls then fail with:
-                    // "This command is not available inside math." Render pending markers
-                    // first, finish the whole document, then normalize in a separate pass.
+                    // Render first with non-locking bookmarks only. Do not build OMath while
+                    // Word is still typing the page; normalization is a separate pass below.
                     word.InsertOcrBlocks(
                         document,
                         false,
@@ -172,7 +169,7 @@ namespace WordGeminiFormula.AddIn
             try
             {
                 EnsureConnected();
-                var word = new WordDocumentService(_wordApplication);
+                var word = new WordDocumentServiceV3(_wordApplication);
                 int count = word.BeautifyActiveDocument();
                 MessageBox.Show(
                     count == 0 ? "Không tìm thấy đoạn văn nào để format." : $"Đã làm đẹp format cho {count} đoạn văn.",
@@ -191,7 +188,7 @@ namespace WordGeminiFormula.AddIn
             try
             {
                 EnsureConnected();
-                var word = new WordDocumentService(_wordApplication);
+                var word = new WordDocumentServiceV3(_wordApplication);
                 int count = word.NormalizeAllMarkedFormulas();
                 string failed = word.LastNormalizationFailureCount > 0
                     ? $" Có {word.LastNormalizationFailureCount} công thức chưa chuyển đổi được; chúng được giữ nguyên và tô vàng."
@@ -215,7 +212,7 @@ namespace WordGeminiFormula.AddIn
             try
             {
                 EnsureConnected();
-                new WordDocumentService(_wordApplication).NormalizeSelection();
+                new WordDocumentServiceV3(_wordApplication).NormalizeSelection();
             }
             catch (Exception ex)
             {
