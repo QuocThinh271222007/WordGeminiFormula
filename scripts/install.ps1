@@ -28,17 +28,24 @@ if (-not (Test-Path $DllPath)) {
 $clsid = '{7BA1B881-3DA4-4FBA-A25D-5F92141658EE}'
 $progId = 'WordGeminiFormula.AddIn'
 $className = 'WordGeminiFormula.AddIn.Connect'
-$assembly = 'WordGeminiFormula.AddIn, Version=0.1.0.0, Culture=neutral, PublicKeyToken=null'
+$assemblyVersion = '0.1.0.0'
+$assembly = "WordGeminiFormula.AddIn, Version=$assemblyVersion, Culture=neutral, PublicKeyToken=null"
 $runtime = 'v4.0.30319'
 $codeBase = ([System.Uri]$DllPath).AbsoluteUri
+$managedCategory = '{62C8FE65-4EBB-45E7-B440-6E39B2CDBF29}'
 
 $clsidPath = "HKCU:\Software\Classes\CLSID\$clsid"
 $inproc = Join-Path $clsidPath 'InprocServer32'
+$versionedInproc = Join-Path $inproc $assemblyVersion
 $progIdPath = "HKCU:\Software\Classes\$progId"
 $addinPath = "HKCU:\Software\Microsoft\Office\Word\Addins\$progId"
 
+# Remove stale class registration from earlier versions before recreating it.
+if (Test-Path $clsidPath) { Remove-Item -Path $clsidPath -Recurse -Force }
+if (Test-Path $progIdPath) { Remove-Item -Path $progIdPath -Recurse -Force }
+
 New-Item -Path $inproc -Force | Out-Null
-Set-Item -Path $clsidPath -Value 'Word Gemini Formula' -Force
+Set-Item -Path $clsidPath -Value $className -Force
 Set-Item -Path $inproc -Value 'mscoree.dll' -Force
 New-ItemProperty -Path $inproc -Name 'ThreadingModel' -Value 'Both' -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $inproc -Name 'Class' -Value $className -PropertyType String -Force | Out-Null
@@ -46,10 +53,19 @@ New-ItemProperty -Path $inproc -Name 'Assembly' -Value $assembly -PropertyType S
 New-ItemProperty -Path $inproc -Name 'RuntimeVersion' -Value $runtime -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $inproc -Name 'CodeBase' -Value $codeBase -PropertyType String -Force | Out-Null
 
+# RegAsm-style version-specific registration is required by the CLR COM loader.
+New-Item -Path $versionedInproc -Force | Out-Null
+New-ItemProperty -Path $versionedInproc -Name 'Class' -Value $className -PropertyType String -Force | Out-Null
+New-ItemProperty -Path $versionedInproc -Name 'Assembly' -Value $assembly -PropertyType String -Force | Out-Null
+New-ItemProperty -Path $versionedInproc -Name 'RuntimeVersion' -Value $runtime -PropertyType String -Force | Out-Null
+New-ItemProperty -Path $versionedInproc -Name 'CodeBase' -Value $codeBase -PropertyType String -Force | Out-Null
+
 New-Item -Path "$clsidPath\ProgId" -Force | Out-Null
 Set-Item -Path "$clsidPath\ProgId" -Value $progId -Force
+New-Item -Path "$clsidPath\Implemented Categories\$managedCategory" -Force | Out-Null
+
 New-Item -Path "$progIdPath\CLSID" -Force | Out-Null
-Set-Item -Path $progIdPath -Value 'Word Gemini Formula' -Force
+Set-Item -Path $progIdPath -Value $className -Force
 Set-Item -Path "$progIdPath\CLSID" -Value $clsid -Force
 
 New-Item -Path $addinPath -Force | Out-Null
