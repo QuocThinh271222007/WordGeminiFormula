@@ -22,8 +22,9 @@ jobs:
           $dll = (Resolve-Path 'src/WordGeminiFormula.AddIn/bin/Release/net48/WordGeminiFormula.AddIn.dll').Path
           Add-Type -Path $dll
           $converter = New-Object WordGeminiFormula.AddIn.Word.LatexToUnicodeMathConverter
+          $realSet = [string][char]0x211D
           $cases = @(
-            @{ Input = '\mathbbR'; MustContain = 'ℝ'; Name = 'real-number set repair' },
+            @{ Input = '\mathbbR'; MustContain = $realSet; Name = 'real-number set repair' },
             @{ Input = '\overrightarrowAB'; MustContain = '\vec'; Name = 'vector repair' },
             @{ Input = '\frac{x^2+1}{x-1}'; MustContain = '/'; Name = 'fraction conversion' },
             @{ Input = '\begin{cases}x+y<3\\x-y+1>0\end{cases}'; MustContain = '\matrix'; Name = 'cases conversion' }
