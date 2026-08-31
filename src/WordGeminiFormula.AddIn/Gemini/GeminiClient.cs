@@ -18,7 +18,7 @@ namespace WordGeminiFormula.AddIn.Gemini
 
         private static HttpClient CreateHttpClient()
         {
-            return new HttpClient { Timeout = TimeSpan.FromSeconds(90) };
+            return new HttpClient { Timeout = TimeSpan.FromSeconds(120) };
         }
 
         public OcrDocument OcrImage(string apiKey, string model, string imagePath)
@@ -29,11 +29,9 @@ namespace WordGeminiFormula.AddIn.Gemini
 
             byte[] bytes = File.ReadAllBytes(imagePath);
             if (bytes.Length > MaxInlineImageBytes)
-                throw new InvalidOperationException("Ảnh quá lớn cho chế độ inline. V1 giới hạn 18 MB để chừa dung lượng cho prompt và JSON request.");
+                throw new InvalidOperationException("Ảnh quá lớn cho chế độ inline. Giới hạn hiện tại là 18 MB.");
 
             string mimeType = GetMimeType(imagePath);
-            string prompt = OcrPrompt;
-
             var request = new
             {
                 contents = new[]
@@ -43,7 +41,7 @@ namespace WordGeminiFormula.AddIn.Gemini
                         role = "user",
                         parts = new object[]
                         {
-                            new { text = prompt },
+                            new { text = OcrPrompt },
                             new
                             {
                                 inlineData = new
@@ -57,26 +55,17 @@ namespace WordGeminiFormula.AddIn.Gemini
                 },
                 generationConfig = new
                 {
-                    responseMimeType = "application/json"
+                    responseMimeType = "application/json",
+                    temperature = 0.0
                 }
             };
 
-            string output = Generate(apiKey, model, request);
-            output = StripJsonFence(output);
+            string output = StripJsonFence(Generate(apiKey, model, request));
             var doc = _json.Deserialize<OcrDocument>(output);
             if (doc?.blocks == null)
-                throw new InvalidOperationException("Gemini trả về JSON không đúng schema OCR.");
+                throw new InvalidOperationException("Gemini trả về JSON không đúng schema OCR V0.2.");
 
-            foreach (var block in doc.blocks)
-            {
-                block.type = (block.type ?? string.Empty).Trim().ToLowerInvariant();
-                if (block.type == "formula")
-                {
-                    block.latex = (block.latex ?? string.Empty).Trim();
-                    block.word_linear = (block.word_linear ?? string.Empty).Trim();
-                }
-            }
-
+            NormalizeDocument(doc);
             return doc;
         }
 
@@ -105,6 +94,45 @@ namespace WordGeminiFormula.AddIn.Gemini
             {
                 message = ex.Message;
                 return false;
+            }
+        }
+
+        private static void NormalizeDocument(OcrDocument doc)
+        {
+            doc.document_type = (doc.document_type ?? "general").Trim().ToLowerInvariant();
+            if (doc.warnings == null) doc.warnings = new List<string>();
+
+            foreach (var block in doc.blocks.Where(b => b != null))
+            {
+                block.type = (block.type ?? "text").Trim().ToLowerInvariant();
+                block.text = block.text?.Trim();
+                block.label = block.label?.Trim();
+                block.number = block.number?.Trim();
+                block.latex = block.latex?.Trim();
+                block.word_linear = block.word_linear?.Trim();
+                if (block.content == null) block.content = new List<OcrInline>();
+                if (block.choices == null) block.choices = new List<OcrChoice>();
+
+                foreach (var part in block.content.Where(p => p != null))
+                {
+                    part.type = (part.type ?? "text").Trim().ToLowerInvariant();
+                    part.text = part.text?.Trim();
+                    part.latex = part.latex?.Trim();
+                    part.word_linear = part.word_linear?.Trim();
+                }
+
+                foreach (var choice in block.choices.Where(c => c != null))
+                {
+                    choice.label = choice.label?.Trim();
+                    if (choice.content == null) choice.content = new List<OcrInline>();
+                    foreach (var part in choice.content.Where(p => p != null))
+                    {
+                        part.type = (part.type ?? "text").Trim().ToLowerInvariant();
+                        part.text = part.text?.Trim();
+                        part.latex = part.latex?.Trim();
+                        part.word_linear = part.word_linear?.Trim();
+                    }
+                }
             }
         }
 
@@ -184,25 +212,82 @@ namespace WordGeminiFormula.AddIn.Gemini
         }
 
         private const string OcrPrompt = @"
-You are an OCR engine for Vietnamese academic and mathematics documents.
-Transcribe the image faithfully. Do NOT solve, simplify, infer missing values, or change mathematical meaning.
-Preserve paragraph order and punctuation.
+You are a high-precision OCR + document-layout engine for Vietnamese academic documents, especially mathematics exams.
+Your output will be rendered into an editable Microsoft Word document.
 
-Return JSON only with this exact shape:
+CORE REQUIREMENTS
+- Transcribe faithfully. Do NOT solve questions, simplify expressions, change answers, or invent missing content.
+- Preserve reading order, punctuation and visible document hierarchy.
+- Recognize layout semantics instead of emitting every visual line as an unrelated paragraph.
+- Keep mathematical expressions as math fragments, not flattened prose.
+- Use standard mathematical notation when the image is visually unambiguous: f(x), g(x), u_n, u_1, P(A), vectors, coordinates, intervals, derivatives, integrals, matrices, cases, logarithm bases, etc.
+- If a symbol is genuinely unclear, keep the most literal reading and lower confidence; do not guess a different problem.
+
+DOCUMENT TYPE
+Set document_type to ""exam"" for an exam/test page, otherwise ""general"".
+
+RETURN JSON ONLY. Use this schema:
 {
+  ""document_type"": ""exam"",
+  ""warnings"": [""optional warning""],
   ""blocks"": [
-    { ""type"": ""text"", ""text"": ""..."" },
-    { ""type"": ""formula"", ""latex"": ""..."", ""word_linear"": ""..."" }
+    { ""type"": ""header_left"", ""text"": ""multi-line text"" },
+    { ""type"": ""header_right"", ""text"": ""multi-line text"" },
+    { ""type"": ""title"", ""text"": ""..."" },
+    { ""type"": ""subtitle"", ""text"": ""..."" },
+    { ""type"": ""meta"", ""text"": ""..."" },
+    { ""type"": ""candidate_field"", ""label"": ""Họ, tên thí sinh"", ""text"": """" },
+    { ""type"": ""code_box"", ""label"": ""Mã đề"", ""text"": ""0101"" },
+    { ""type"": ""section"", ""text"": ""PHẦN I: ..."" },
+    {
+      ""type"": ""question"",
+      ""number"": ""1"",
+      ""content"": [
+        { ""type"": ""text"", ""text"": ""Cho cấp số cộng "" },
+        { ""type"": ""math"", ""latex"": ""u_n"", ""word_linear"": ""u_n"", ""confidence"": 1.0 }
+      ],
+      ""choices"": [
+        { ""label"": ""A"", ""content"": [{ ""type"": ""text"", ""text"": ""4."" }] }
+      ]
+    },
+    { ""type"": ""formula"", ""latex"": ""..."", ""word_linear"": ""..."", ""display"": true },
+    {
+      ""type"": ""figure"",
+      ""text"": ""short description only"",
+      ""bbox"": { ""x"": 0.1, ""y"": 0.2, ""width"": 0.4, ""height"": 0.3 },
+      ""confidence"": 0.7
+    },
+    {
+      ""type"": ""table_image"",
+      ""text"": ""variation table / diagram that should be preserved visually"",
+      ""bbox"": { ""x"": 0.1, ""y"": 0.2, ""width"": 0.7, ""height"": 0.2 },
+      ""confidence"": 0.8
+    },
+    { ""type"": ""footer"", ""text"": ""..."" }
   ]
 }
 
-Rules for formula blocks:
-1. latex: valid LaTeX for the exact visible expression.
-2. word_linear: equivalent Microsoft Word UnicodeMath linear input suitable for an equation region and Professional conversion.
-3. Preserve superscripts, subscripts, fractions, radicals, integrals, sums, limits, vectors, matrices, cases, Greek symbols, intervals, set notation, and accents.
-4. For Word UnicodeMath use forms such as a/(b+c), \sqrt(x), \sqrt(n&x), \matrix(a&b@c&d), and standard Math AutoCorrect commands where applicable.
-5. Never merge normal prose into a formula block unless it is visibly part of the mathematical expression.
-6. If a symbol is unclear, transcribe the most literal visible symbol; do not guess a different problem statement.
+BLOCK RULES
+1. For an exam header with two visual columns, emit one header_left and one header_right block. Do not split each line into separate generic text blocks.
+2. Emit each multiple-choice problem as ONE question block with inline content plus its A/B/C/D choices.
+3. Inline formulas inside sentences belong in question.content/choice.content as type=math.
+4. A standalone displayed formula may use type=formula.
+5. candidate_field is for dotted candidate fields such as name/student number.
+6. code_box is for boxed exam code fields.
+7. section is for headings such as PHẦN I.
+8. footer is for page number / exam-code footer.
+
+MATH RULES
+- latex must be syntactically valid LaTeX for the exact visible expression.
+- word_linear must be equivalent Microsoft Word UnicodeMath/Math AutoCorrect linear input.
+- Preserve superscripts, subscripts, fractions, radicals, integrals, sums, limits, vectors, matrices, systems/cases, Greek symbols, intervals, sets and accents.
+- Prefer explicit grouping. Examples: f(x), g'(x)=x^2, \\mathbb{R}, \\overrightarrow{AB}, A(1;5;1), \\log_3(x-1), \\begin{cases}...\\end{cases}.
+- Do not remove parentheses from function notation or coordinates.
+
+DIFFICULT VISUAL REGIONS
+- Do NOT flatten geometry diagrams, graphs, variation tables, or visually structured tables into unreliable prose.
+- Emit figure/table_image with a tight bbox using normalized x/y/width/height in [0,1], so Word can preserve that region as an image.
+- Use type=unresolved with bbox when a region cannot be transcribed reliably. Include a short text reason.
 ";
     }
 }
