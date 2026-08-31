@@ -14,7 +14,7 @@ function Test-IsAdministrator {
 function Invoke-Reg([string[]]$Arguments) {
     & "$env:SystemRoot\System32\reg.exe" @Arguments | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        throw "reg.exe failed with exit code $LASTEXITCODE: $($Arguments -join ' ')"
+        throw "reg.exe failed with exit code ${LASTEXITCODE}: $($Arguments -join ' ')"
     }
 }
 
@@ -81,7 +81,7 @@ if ($regasmPaths.Count -eq 0) {
 foreach ($regasm in $regasmPaths) {
     & $regasm $DllPath /nologo /codebase
     if ($LASTEXITCODE -ne 0) {
-        throw "RegAsm failed with exit code $LASTEXITCODE: $regasm"
+        throw "RegAsm failed with exit code ${LASTEXITCODE}: $regasm"
     }
 }
 
