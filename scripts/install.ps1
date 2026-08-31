@@ -5,6 +5,19 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Test-IsAdministrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Invoke-Reg([string[]]$Arguments) {
+    & "$env:SystemRoot\System32\reg.exe" @Arguments | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "reg.exe failed with exit code $LASTEXITCODE: $($Arguments -join ' ')"
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($DllPath)) {
     $packagedDll = Join-Path $PSScriptRoot 'WordGeminiFormula.AddIn.dll'
     $sourceDll = Join-Path $PSScriptRoot '..\src\WordGeminiFormula.AddIn\bin\Release\net48\WordGeminiFormula.AddIn.dll'
@@ -25,55 +38,63 @@ if (-not (Test-Path $DllPath)) {
     throw "DLL not found: $DllPath"
 }
 
+if (-not (Test-IsAdministrator)) {
+    Write-Host 'Administrator permission is required for .NET COM registration. Opening UAC...' -ForegroundColor Yellow
+    $quotedScript = '"' + $PSCommandPath.Replace('"', '\"') + '"'
+    $quotedDll = '"' + $DllPath.Replace('"', '\"') + '"'
+    $argLine = "-NoProfile -ExecutionPolicy Bypass -File $quotedScript -DllPath $quotedDll"
+    $process = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Verb RunAs -ArgumentList $argLine -Wait -PassThru
+    if ($process.ExitCode -ne 0) {
+        throw "Elevated installer failed with exit code $($process.ExitCode)."
+    }
+    exit 0
+}
+
 $clsid = '{7BA1B881-3DA4-4FBA-A25D-5F92141658EE}'
 $progId = 'WordGeminiFormula.AddIn'
-$className = 'WordGeminiFormula.AddIn.Connect'
-$assemblyVersion = '0.1.0.0'
-$assembly = "WordGeminiFormula.AddIn, Version=$assemblyVersion, Culture=neutral, PublicKeyToken=null"
-$runtime = 'v4.0.30319'
-$codeBase = ([System.Uri]$DllPath).AbsoluteUri
-$managedCategory = '{62C8FE65-4EBB-45E7-B440-6E39B2CDBF29}'
+$officeAddinKey = "HKCU\Software\Microsoft\Office\Word\Addins\$progId"
 
-$clsidPath = "HKCU:\Software\Classes\CLSID\$clsid"
-$inproc = Join-Path $clsidPath 'InprocServer32'
-$versionedInproc = Join-Path $inproc $assemblyVersion
-$progIdPath = "HKCU:\Software\Classes\$progId"
-$addinPath = "HKCU:\Software\Microsoft\Office\Word\Addins\$progId"
+# Clean legacy per-user COM registration created by V0.1.
+$legacyKeys = @(
+    "HKCU\Software\Classes\CLSID\$clsid",
+    "HKCU\Software\Classes\$progId"
+)
+foreach ($key in $legacyKeys) {
+    & "$env:SystemRoot\System32\reg.exe" delete $key /f /reg:64 2>$null | Out-Null
+    & "$env:SystemRoot\System32\reg.exe" delete $key /f /reg:32 2>$null | Out-Null
+}
 
-# Remove stale class registration from earlier versions before recreating it.
-if (Test-Path $clsidPath) { Remove-Item -Path $clsidPath -Recurse -Force }
-if (Test-Path $progIdPath) { Remove-Item -Path $progIdPath -Recurse -Force }
+# Register the managed COM class in both registry views on 64-bit Windows so
+# either 32-bit or 64-bit Word can load the same AnyCPU .NET Framework assembly.
+$regasmPaths = New-Object System.Collections.Generic.List[string]
+if ([Environment]::Is64BitOperatingSystem) {
+    $regasm64 = "$env:SystemRoot\Microsoft.NET\Framework64\v4.0.30319\RegAsm.exe"
+    if (Test-Path $regasm64) { $regasmPaths.Add($regasm64) }
+}
+$regasm32 = "$env:SystemRoot\Microsoft.NET\Framework\v4.0.30319\RegAsm.exe"
+if (Test-Path $regasm32) { $regasmPaths.Add($regasm32) }
 
-New-Item -Path $inproc -Force | Out-Null
-Set-Item -Path $clsidPath -Value $className -Force
-Set-Item -Path $inproc -Value 'mscoree.dll' -Force
-New-ItemProperty -Path $inproc -Name 'ThreadingModel' -Value 'Both' -PropertyType String -Force | Out-Null
-New-ItemProperty -Path $inproc -Name 'Class' -Value $className -PropertyType String -Force | Out-Null
-New-ItemProperty -Path $inproc -Name 'Assembly' -Value $assembly -PropertyType String -Force | Out-Null
-New-ItemProperty -Path $inproc -Name 'RuntimeVersion' -Value $runtime -PropertyType String -Force | Out-Null
-New-ItemProperty -Path $inproc -Name 'CodeBase' -Value $codeBase -PropertyType String -Force | Out-Null
+if ($regasmPaths.Count -eq 0) {
+    throw '.NET Framework RegAsm.exe was not found. Install/repair .NET Framework 4.8.'
+}
 
-# RegAsm-style version-specific registration is required by the CLR COM loader.
-New-Item -Path $versionedInproc -Force | Out-Null
-New-ItemProperty -Path $versionedInproc -Name 'Class' -Value $className -PropertyType String -Force | Out-Null
-New-ItemProperty -Path $versionedInproc -Name 'Assembly' -Value $assembly -PropertyType String -Force | Out-Null
-New-ItemProperty -Path $versionedInproc -Name 'RuntimeVersion' -Value $runtime -PropertyType String -Force | Out-Null
-New-ItemProperty -Path $versionedInproc -Name 'CodeBase' -Value $codeBase -PropertyType String -Force | Out-Null
+foreach ($regasm in $regasmPaths) {
+    & $regasm $DllPath /nologo /codebase
+    if ($LASTEXITCODE -ne 0) {
+        throw "RegAsm failed with exit code $LASTEXITCODE: $regasm"
+    }
+}
 
-New-Item -Path "$clsidPath\ProgId" -Force | Out-Null
-Set-Item -Path "$clsidPath\ProgId" -Value $progId -Force
-New-Item -Path "$clsidPath\Implemented Categories\$managedCategory" -Force | Out-Null
+# Word discovers COM add-ins through this per-user key. Write both registry
+# views because Office may be installed as either 32-bit or 64-bit.
+$views = if ([Environment]::Is64BitOperatingSystem) { @('64', '32') } else { @('32') }
+foreach ($view in $views) {
+    Invoke-Reg @('add', $officeAddinKey, '/v', 'FriendlyName', '/t', 'REG_SZ', '/d', 'Word Gemini Formula', '/f', "/reg:$view")
+    Invoke-Reg @('add', $officeAddinKey, '/v', 'Description', '/t', 'REG_SZ', '/d', 'Gemini OCR and native Word equation normalization', '/f', "/reg:$view")
+    Invoke-Reg @('add', $officeAddinKey, '/v', 'LoadBehavior', '/t', 'REG_DWORD', '/d', '3', '/f', "/reg:$view")
+    Invoke-Reg @('add', $officeAddinKey, '/v', 'CommandLineSafe', '/t', 'REG_DWORD', '/d', '0', '/f', "/reg:$view")
+}
 
-New-Item -Path "$progIdPath\CLSID" -Force | Out-Null
-Set-Item -Path $progIdPath -Value $className -Force
-Set-Item -Path "$progIdPath\CLSID" -Value $clsid -Force
-
-New-Item -Path $addinPath -Force | Out-Null
-New-ItemProperty -Path $addinPath -Name 'FriendlyName' -Value 'Word Gemini Formula' -PropertyType String -Force | Out-Null
-New-ItemProperty -Path $addinPath -Name 'Description' -Value 'Gemini OCR and native Word equation normalization' -PropertyType String -Force | Out-Null
-New-ItemProperty -Path $addinPath -Name 'LoadBehavior' -Value 3 -PropertyType DWord -Force | Out-Null
-New-ItemProperty -Path $addinPath -Name 'CommandLineSafe' -Value 0 -PropertyType DWord -Force | Out-Null
-
-Write-Host 'Word Gemini Formula was registered for the current Windows user.' -ForegroundColor Green
+Write-Host 'Word Gemini Formula COM registration completed successfully.' -ForegroundColor Green
 Write-Host "DLL: $DllPath"
 Write-Host 'Close all Word windows and reopen Word. Ribbon tab: AI Formula.'
