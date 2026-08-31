@@ -15,6 +15,26 @@ jobs:
       - name: Restore and build
         shell: pwsh
         run: msbuild WordGeminiFormula.sln /t:Restore,Build /p:Configuration=Release /p:Platform="Any CPU"
+      - name: Math conversion regression smoke test
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dll = (Resolve-Path 'src/WordGeminiFormula.AddIn/bin/Release/net48/WordGeminiFormula.AddIn.dll').Path
+          Add-Type -Path $dll
+          $converter = New-Object WordGeminiFormula.AddIn.Word.LatexToUnicodeMathConverter
+          $cases = @(
+            @{ Input = '\mathbbR'; MustContain = 'ℝ'; Name = 'real-number set repair' },
+            @{ Input = '\overrightarrowAB'; MustContain = '\vec'; Name = 'vector repair' },
+            @{ Input = '\frac{x^2+1}{x-1}'; MustContain = '/'; Name = 'fraction conversion' },
+            @{ Input = '\begin{cases}x+y<3\\x-y+1>0\end{cases}'; MustContain = '\matrix'; Name = 'cases conversion' }
+          )
+          foreach ($case in $cases) {
+            $actual = $converter.Convert($case.Input)
+            if ([string]::IsNullOrWhiteSpace($actual) -or -not $actual.Contains($case.MustContain)) {
+              throw "Math smoke failed: $($case.Name). Input=$($case.Input) Output=$actual"
+            }
+            Write-Host "PASS $($case.Name): $actual"
+          }
       - name: Installer COM and Office interface smoke test
         shell: powershell
         run: |
