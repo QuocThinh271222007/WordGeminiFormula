@@ -113,19 +113,35 @@ namespace WordGeminiFormula.AddIn
                     string rawSnapshotPath = SaveRawOcrSnapshot(_geminiClient.LastRawOcrJson);
 
                     var word = new WordDocumentService(_wordApplication);
+
+                    // Never build Word OMath while the OCR renderer is still typing the page.
+                    // Word can leave Selection inside a math zone after OMath.BuildUp(), and
+                    // subsequent TypeText/TypeParagraph calls then fail with:
+                    // "This command is not available inside math." Render pending markers
+                    // first, finish the whole document, then normalize in a separate pass.
                     word.InsertOcrBlocks(
                         document,
-                        settings.autoNormalizeAfterOcr,
+                        false,
                         settings.autoBeautifyAfterOcr,
                         imagePath,
                         settings.preserveDifficultRegionsAsImage);
+
+                    int normalizedCount = 0;
+                    if (settings.autoNormalizeAfterOcr)
+                    {
+                        StartupTrace.Write("OCR render complete; starting deferred math normalization");
+                        normalizedCount = word.NormalizeAllMarkedFormulas();
+                        StartupTrace.Write("Deferred math normalization complete; converted=" + normalizedCount + "; failed=" + word.LastNormalizationFailureCount);
+                    }
 
                     string warningText = document.warnings != null && document.warnings.Count > 0
                         ? "\n\nGemini cảnh báo:\n- " + string.Join("\n- ", document.warnings)
                         : string.Empty;
                     string formulaText = settings.autoNormalizeAfterOcr && word.LastNormalizationFailureCount > 0
-                        ? $"\n\nCó {word.LastNormalizationFailureCount} công thức chưa chuyển đổi được và đã được giữ nguyên/tô vàng để kiểm tra."
-                        : string.Empty;
+                        ? $"\n\nĐã chuẩn hóa {normalizedCount} công thức. Có {word.LastNormalizationFailureCount} công thức chưa chuyển đổi được và đã được giữ nguyên/tô vàng để kiểm tra."
+                        : settings.autoNormalizeAfterOcr
+                            ? $"\n\nĐã chuẩn hóa {normalizedCount} công thức sau khi hoàn tất render."
+                            : string.Empty;
                     string snapshotText = string.IsNullOrWhiteSpace(rawSnapshotPath)
                         ? string.Empty
                         : "\n\nRaw OCR: " + rawSnapshotPath;
@@ -146,6 +162,7 @@ namespace WordGeminiFormula.AddIn
             }
             catch (Exception ex)
             {
+                StartupTrace.Write("OnOcrImage FAILED: " + ex);
                 ShowError(ex);
             }
         }
