@@ -36,6 +36,18 @@ jobs:
             }
             Write-Host "PASS $($case.Name): $actual"
           }
+      - name: Word range safety regression guard
+        shell: pwsh
+        run: |
+          $path = 'src/WordGeminiFormula.AddIn/Word/WordDocumentService.cs'
+          $source = Get-Content $path -Raw
+          if ($source -match 'document\.Content\.Text' -or $source -match 'match\.Index') {
+            throw 'Unsafe flattened-text Word Range normalization has returned.'
+          }
+          if ($source -notmatch 'PendingMathTagPrefix' -or $source -notmatch 'ContentControls' -or $source -notmatch 'Range\.Find|FindTextRange') {
+            throw 'Tracked Content Control / Word Range.Find normalization safeguards are missing.'
+          }
+          Write-Host 'PASS Word formula ranges are tracked by Word, not flattened text offsets.' -ForegroundColor Green
       - name: Installer COM and Office interface smoke test
         shell: powershell
         run: |
