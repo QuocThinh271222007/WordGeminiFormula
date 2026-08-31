@@ -112,10 +112,10 @@ namespace WordGeminiFormula.AddIn
                     var document = _geminiClient.OcrImage(apiKey, settings.model, imagePath, settings.documentPreset);
                     string rawSnapshotPath = SaveRawOcrSnapshot(_geminiClient.LastRawOcrJson);
 
-                    var word = new WordDocumentServiceV3(_wordApplication);
+                    var word = new WordDocumentServiceV4(_wordApplication);
 
-                    // Render first with non-locking bookmarks only. Do not build OMath while
-                    // Word is still typing the page; normalization is a separate pass below.
+                    // V4 canonicalizes math, anchors visuals and compacts exam layout while
+                    // retaining V3's bookmark-only first pass. OMath remains deferred.
                     word.InsertOcrBlocks(
                         document,
                         false,
@@ -126,9 +126,9 @@ namespace WordGeminiFormula.AddIn
                     int normalizedCount = 0;
                     if (settings.autoNormalizeAfterOcr)
                     {
-                        StartupTrace.Write("OCR render complete; starting deferred math normalization");
+                        StartupTrace.Write("OCR render complete; starting deferred V4 math normalization");
                         normalizedCount = word.NormalizeAllMarkedFormulas();
-                        StartupTrace.Write("Deferred math normalization complete; converted=" + normalizedCount + "; failed=" + word.LastNormalizationFailureCount);
+                        StartupTrace.Write("Deferred V4 math normalization complete; converted=" + normalizedCount + "; failed=" + word.LastNormalizationFailureCount);
                     }
 
                     string warningText = document.warnings != null && document.warnings.Count > 0
@@ -169,7 +169,7 @@ namespace WordGeminiFormula.AddIn
             try
             {
                 EnsureConnected();
-                var word = new WordDocumentServiceV3(_wordApplication);
+                var word = new WordDocumentServiceV4(_wordApplication);
                 int count = word.BeautifyActiveDocument();
                 MessageBox.Show(
                     count == 0 ? "Không tìm thấy đoạn văn nào để format." : $"Đã làm đẹp format cho {count} đoạn văn.",
@@ -188,7 +188,7 @@ namespace WordGeminiFormula.AddIn
             try
             {
                 EnsureConnected();
-                var word = new WordDocumentServiceV3(_wordApplication);
+                var word = new WordDocumentServiceV4(_wordApplication);
                 int count = word.NormalizeAllMarkedFormulas();
                 string failed = word.LastNormalizationFailureCount > 0
                     ? $" Có {word.LastNormalizationFailureCount} công thức chưa chuyển đổi được; chúng được giữ nguyên và tô vàng."
@@ -212,7 +212,7 @@ namespace WordGeminiFormula.AddIn
             try
             {
                 EnsureConnected();
-                new WordDocumentServiceV3(_wordApplication).NormalizeSelection();
+                new WordDocumentServiceV4(_wordApplication).NormalizeSelection();
             }
             catch (Exception ex)
             {
