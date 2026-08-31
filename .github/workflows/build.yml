@@ -49,7 +49,8 @@ jobs:
 
           [ComImport, Guid("000C0396-0000-0000-C000-000000000046"), TypeLibType((short)0x1040)]
           public interface ISmokeRibbonExtensibility {
-              [DispId(1), return: MarshalAs(UnmanagedType.BStr)]
+              [DispId(1)]
+              [return: MarshalAs(UnmanagedType.BStr)]
               [MethodImpl(MethodImplOptions.InternalCall, MethodCodeType = MethodCodeType.Runtime)]
               string GetCustomUI([In, MarshalAs(UnmanagedType.BStr)] string ribbonId);
           }
