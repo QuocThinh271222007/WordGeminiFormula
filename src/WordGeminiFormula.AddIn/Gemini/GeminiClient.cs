@@ -1,10 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using WordGeminiFormula.AddIn.Models;
 
@@ -13,14 +16,22 @@ namespace WordGeminiFormula.AddIn.Gemini
     public sealed class GeminiClient
     {
         private const int MaxInlineImageBytes = 18 * 1024 * 1024;
+        private static readonly TimeSpan OcrAttemptTimeout = TimeSpan.FromMinutes(5);
+        private static readonly TimeSpan TestAttemptTimeout = TimeSpan.FromSeconds(30);
+        private const int OcrMaxAttempts = 2;
+
         private static readonly HttpClient Http = CreateHttpClient();
         private readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
 
         public string LastRawOcrJson { get; private set; }
+        public string LastTransportDiagnostic { get; private set; }
 
         private static HttpClient CreateHttpClient()
         {
-            return new HttpClient { Timeout = TimeSpan.FromSeconds(120) };
+            // Per-request CancellationTokenSource instances below own timeout policy.
+            // A global HttpClient timeout used to surface only the unhelpful
+            // "A task was canceled" message after 120 seconds.
+            return new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
         }
 
         public OcrDocument OcrImage(string apiKey, string model, string imagePath, string documentPreset = null)
@@ -59,13 +70,34 @@ namespace WordGeminiFormula.AddIn.Gemini
                 generationConfig = new
                 {
                     responseMimeType = "application/json",
-                    temperature = 0.0
+                    // OCR/layout extraction is latency-sensitive and does not need the
+                    // default medium reasoning effort of Gemini 3.7 Flash.
+                    thinkingConfig = new { thinkingLevel = "low" },
+                    maxOutputTokens = 16384
                 }
             };
 
-            string output = StripJsonFence(Generate(apiKey, model, request));
+            string output = StripJsonFence(Generate(
+                apiKey,
+                model,
+                request,
+                OcrAttemptTimeout,
+                OcrMaxAttempts,
+                "Gemini OCR"));
+
             LastRawOcrJson = output;
-            var doc = _json.Deserialize<OcrDocument>(output);
+            OcrDocument doc;
+            try
+            {
+                doc = _json.Deserialize<OcrDocument>(output);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    "Gemini đã phản hồi nhưng JSON OCR không hợp lệ. Raw response đã được giữ để chẩn đoán.",
+                    ex);
+            }
+
             if (doc?.blocks == null)
                 throw new InvalidOperationException("Gemini trả về JSON không đúng schema OCR V0.2.");
 
@@ -87,10 +119,22 @@ namespace WordGeminiFormula.AddIn.Gemini
                             role = "user",
                             parts = new[] { new { text = "Reply with exactly: OK" } }
                         }
+                    },
+                    generationConfig = new
+                    {
+                        thinkingConfig = new { thinkingLevel = "low" },
+                        maxOutputTokens = 32
                     }
                 };
 
-                string output = Generate(apiKey, model, request).Trim();
+                string output = Generate(
+                    apiKey,
+                    model,
+                    request,
+                    TestAttemptTimeout,
+                    1,
+                    "Kiểm tra kết nối Gemini").Trim();
+
                 message = string.IsNullOrWhiteSpace(output) ? "API phản hồi rỗng." : "Kết nối thành công: " + output;
                 return !string.IsNullOrWhiteSpace(output);
             }
@@ -149,44 +193,125 @@ namespace WordGeminiFormula.AddIn.Gemini
             }
         }
 
-        private string Generate(string apiKey, string model, object request)
+        private string Generate(
+            string apiKey,
+            string model,
+            object request,
+            TimeSpan attemptTimeout,
+            int maxAttempts,
+            string operationName)
         {
             string url = "https://generativelanguage.googleapis.com/v1beta/models/" + Uri.EscapeDataString(model) + ":generateContent";
             string body = _json.Serialize(request);
+            Exception lastTransportError = null;
+            maxAttempts = Math.Max(1, maxAttempts);
 
-            using (var message = new HttpRequestMessage(HttpMethod.Post, url))
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
             {
-                message.Headers.Add("x-goog-api-key", apiKey.Trim());
-                message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-                message.Content = new StringContent(body, Encoding.UTF8, "application/json");
-
-                using (HttpResponseMessage response = Http.SendAsync(message).GetAwaiter().GetResult())
+                var stopwatch = Stopwatch.StartNew();
+                try
                 {
-                    string jsonText = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-                    GeminiGenerateResponse parsed = null;
-                    try { parsed = _json.Deserialize<GeminiGenerateResponse>(jsonText); } catch { }
-
-                    if (!response.IsSuccessStatusCode)
+                    using (var cts = new CancellationTokenSource(attemptTimeout))
+                    using (var message = new HttpRequestMessage(HttpMethod.Post, url))
                     {
-                        string detail = parsed?.error?.message;
-                        if (string.IsNullOrWhiteSpace(detail)) detail = jsonText;
-                        throw new InvalidOperationException($"Gemini API lỗi {(int)response.StatusCode}: {detail}");
+                        message.Headers.Add("x-goog-api-key", apiKey.Trim());
+                        message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                        message.Headers.ExpectContinue = false;
+                        message.Content = new StringContent(body, Encoding.UTF8, "application/json");
+
+                        using (HttpResponseMessage response = Http.SendAsync(
+                            message,
+                            HttpCompletionOption.ResponseContentRead,
+                            cts.Token).GetAwaiter().GetResult())
+                        {
+                            stopwatch.Stop();
+                            LastTransportDiagnostic = string.Format(
+                                "{0}: attempt {1}/{2}, HTTP {3}, elapsed {4:0.0}s",
+                                operationName,
+                                attempt,
+                                maxAttempts,
+                                (int)response.StatusCode,
+                                stopwatch.Elapsed.TotalSeconds);
+
+                            string jsonText = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                            GeminiGenerateResponse parsed = null;
+                            try { parsed = _json.Deserialize<GeminiGenerateResponse>(jsonText); } catch { }
+
+                            if (!response.IsSuccessStatusCode)
+                            {
+                                string detail = parsed?.error?.message;
+                                if (string.IsNullOrWhiteSpace(detail)) detail = jsonText;
+                                throw new InvalidOperationException(
+                                    string.Format("Gemini API lỗi {0}: {1}", (int)response.StatusCode, detail));
+                            }
+
+                            if (parsed?.error != null)
+                                throw new InvalidOperationException("Gemini API: " + parsed.error.message);
+
+                            string text = parsed?.candidates?
+                                .SelectMany(c => c.content?.parts ?? new List<GeminiPart>())
+                                .Select(p => p.text)
+                                .FirstOrDefault(t => !string.IsNullOrWhiteSpace(t));
+
+                            if (string.IsNullOrWhiteSpace(text))
+                                throw new InvalidOperationException("Gemini không trả về nội dung văn bản.");
+
+                            return text;
+                        }
+                    }
+                }
+                catch (TaskCanceledException ex)
+                {
+                    stopwatch.Stop();
+                    lastTransportError = ex;
+                    LastTransportDiagnostic = string.Format(
+                        "{0}: timeout attempt {1}/{2} after {3:0.0}s",
+                        operationName,
+                        attempt,
+                        maxAttempts,
+                        stopwatch.Elapsed.TotalSeconds);
+
+                    if (attempt < maxAttempts)
+                    {
+                        Thread.Sleep(1500 * attempt);
+                        continue;
                     }
 
-                    if (parsed?.error != null)
-                        throw new InvalidOperationException("Gemini API: " + parsed.error.message);
+                    throw new TimeoutException(
+                        string.Format(
+                            "{0} quá thời gian chờ ({1:0} giây/lần, {2} lần thử). Hãy kiểm tra mạng hoặc thử lại; model hiện dùng thinking=low để giảm độ trễ.",
+                            operationName,
+                            attemptTimeout.TotalSeconds,
+                            maxAttempts),
+                        ex);
+                }
+                catch (HttpRequestException ex)
+                {
+                    stopwatch.Stop();
+                    lastTransportError = ex;
+                    LastTransportDiagnostic = string.Format(
+                        "{0}: network failure attempt {1}/{2} after {3:0.0}s: {4}",
+                        operationName,
+                        attempt,
+                        maxAttempts,
+                        stopwatch.Elapsed.TotalSeconds,
+                        ex.Message);
 
-                    string text = parsed?.candidates?
-                        .SelectMany(c => c.content?.parts ?? new List<GeminiPart>())
-                        .Select(p => p.text)
-                        .FirstOrDefault(t => !string.IsNullOrWhiteSpace(t));
+                    if (attempt < maxAttempts)
+                    {
+                        Thread.Sleep(1500 * attempt);
+                        continue;
+                    }
 
-                    if (string.IsNullOrWhiteSpace(text))
-                        throw new InvalidOperationException("Gemini không trả về nội dung văn bản.");
-
-                    return text;
+                    throw new InvalidOperationException(
+                        operationName + " không kết nối được tới Gemini API sau " + maxAttempts + " lần thử: " + ex.Message,
+                        ex);
                 }
             }
+
+            throw new InvalidOperationException(
+                operationName + " thất bại do lỗi truyền tải không xác định.",
+                lastTransportError);
         }
 
         private static void ValidateConfiguration(string apiKey, string model)
