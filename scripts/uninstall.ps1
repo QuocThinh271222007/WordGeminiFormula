@@ -12,4 +12,4 @@ foreach ($path in $paths) {
     if (Test-Path $path) { Remove-Item -Path $path -Recurse -Force }
 }
 
-Write-Host 'Đã gỡ đăng ký Word Gemini Formula. Đóng và mở lại Word.' -ForegroundColor Green
+Write-Host 'Word Gemini Formula registration was removed. Close and reopen Word.' -ForegroundColor Green
