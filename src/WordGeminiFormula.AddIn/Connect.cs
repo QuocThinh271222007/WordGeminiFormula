@@ -13,28 +13,64 @@ namespace WordGeminiFormula.AddIn
     [ComVisible(true)]
     [Guid("7BA1B881-3DA4-4FBA-A25D-5F92141658EE")]
     [ProgId("WordGeminiFormula.AddIn")]
-    [ClassInterface(ClassInterfaceType.AutoDual)]
+    [ClassInterface(ClassInterfaceType.None)]
     public sealed class Connect : IDTExtensibility2, IRibbonExtensibility
     {
         private object _wordApplication;
-        private readonly SettingsStore _settingsStore = new SettingsStore();
-        private readonly GeminiClient _geminiClient = new GeminiClient();
+        private readonly SettingsStore _settingsStore;
+        private readonly GeminiClient _geminiClient;
 
-        public string GetCustomUI(string ribbonId) => RibbonXml.Value;
+        public Connect()
+        {
+            StartupTrace.Write("Connect.ctor begin");
+            try
+            {
+                _settingsStore = new SettingsStore();
+                _geminiClient = new GeminiClient();
+                StartupTrace.Write("Connect.ctor success");
+            }
+            catch (Exception ex)
+            {
+                StartupTrace.Write("Connect.ctor FAILED: " + ex);
+                throw;
+            }
+        }
+
+        public string GetCustomUI(string ribbonId)
+        {
+            StartupTrace.Write("GetCustomUI: " + (ribbonId ?? "<null>"));
+            return RibbonXml.Value;
+        }
 
         public void OnConnection(object application, ExtConnectMode connectMode, object addInInst, ref Array custom)
         {
+            // Keep startup deliberately minimal. Any expensive work happens only
+            // after a Ribbon button is pressed.
+            StartupTrace.Write("OnConnection begin; mode=" + connectMode);
             _wordApplication = application;
+            StartupTrace.Write("OnConnection success");
         }
 
         public void OnDisconnection(ExtDisconnectMode removeMode, ref Array custom)
         {
+            StartupTrace.Write("OnDisconnection; mode=" + removeMode);
             _wordApplication = null;
         }
 
-        public void OnAddInsUpdate(ref Array custom) { }
-        public void OnStartupComplete(ref Array custom) { }
-        public void OnBeginShutdown(ref Array custom) { }
+        public void OnAddInsUpdate(ref Array custom)
+        {
+            StartupTrace.Write("OnAddInsUpdate");
+        }
+
+        public void OnStartupComplete(ref Array custom)
+        {
+            StartupTrace.Write("OnStartupComplete");
+        }
+
+        public void OnBeginShutdown(ref Array custom)
+        {
+            StartupTrace.Write("OnBeginShutdown");
+        }
 
         public void OnOpenSettings(object control)
         {
@@ -145,6 +181,33 @@ namespace WordGeminiFormula.AddIn
         private static void ShowError(Exception ex)
         {
             MessageBox.Show(ex.Message, "Word Gemini Formula", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+
+        private static class StartupTrace
+        {
+            private static readonly object Sync = new object();
+
+            internal static void Write(string message)
+            {
+                try
+                {
+                    string dir = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                        "WordGeminiFormula");
+                    Directory.CreateDirectory(dir);
+                    string path = Path.Combine(dir, "addin-startup.log");
+                    lock (Sync)
+                    {
+                        File.AppendAllText(
+                            path,
+                            DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " | " + message + Environment.NewLine);
+                    }
+                }
+                catch
+                {
+                    // Diagnostics must never prevent Word from loading the add-in.
+                }
+            }
         }
     }
 }
