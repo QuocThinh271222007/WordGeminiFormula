@@ -13,7 +13,7 @@ namespace WordGeminiFormula.AddIn
     [ComVisible(true)]
     [Guid("7BA1B881-3DA4-4FBA-A25D-5F92141658EE")]
     [ProgId("WordGeminiFormula.AddIn")]
-    [ClassInterface(ClassInterfaceType.None)]
+    [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IRibbonExtensibility
     {
         private object _wordApplication;
