@@ -112,10 +112,12 @@ namespace WordGeminiFormula.AddIn
                     var document = _geminiClient.OcrImage(apiKey, settings.model, imagePath, settings.documentPreset);
                     string rawSnapshotPath = SaveRawOcrSnapshot(_geminiClient.LastRawOcrJson);
 
-                    var word = new WordDocumentServiceV4(_wordApplication);
+                    var word = new WordDocumentServiceV5(_wordApplication);
 
-                    // V4 canonicalizes math, anchors visuals and compacts exam layout while
-                    // retaining V3's bookmark-only first pass. OMath remains deferred.
+                    // V5 uses Presentation MathML + Microsoft's MML2OMML transform as the
+                    // preferred equation path while retaining V4 layout and V3 bookmark
+                    // safety. Native Office Math insertion remains deferred until the page
+                    // has completely rendered.
                     word.InsertOcrBlocks(
                         document,
                         false,
@@ -126,9 +128,9 @@ namespace WordGeminiFormula.AddIn
                     int normalizedCount = 0;
                     if (settings.autoNormalizeAfterOcr)
                     {
-                        StartupTrace.Write("OCR render complete; starting deferred V4 math normalization");
+                        StartupTrace.Write("OCR render complete; starting deferred V5 MathML/OMML normalization");
                         normalizedCount = word.NormalizeAllMarkedFormulas();
-                        StartupTrace.Write("Deferred V4 math normalization complete; converted=" + normalizedCount + "; failed=" + word.LastNormalizationFailureCount);
+                        StartupTrace.Write("Deferred V5 math normalization complete; converted=" + normalizedCount + "; failed=" + word.LastNormalizationFailureCount);
                     }
 
                     string warningText = document.warnings != null && document.warnings.Count > 0
@@ -137,7 +139,7 @@ namespace WordGeminiFormula.AddIn
                     string formulaText = settings.autoNormalizeAfterOcr && word.LastNormalizationFailureCount > 0
                         ? $"\n\nĐã chuẩn hóa {normalizedCount} công thức. Có {word.LastNormalizationFailureCount} công thức chưa chuyển đổi được và đã được giữ nguyên/tô vàng để kiểm tra."
                         : settings.autoNormalizeAfterOcr
-                            ? $"\n\nĐã chuẩn hóa {normalizedCount} công thức sau khi hoàn tất render."
+                            ? $"\n\nĐã chuẩn hóa {normalizedCount} công thức bằng MathML/Office Math sau khi hoàn tất render."
                             : string.Empty;
                     string snapshotText = string.IsNullOrWhiteSpace(rawSnapshotPath)
                         ? string.Empty
@@ -169,7 +171,7 @@ namespace WordGeminiFormula.AddIn
             try
             {
                 EnsureConnected();
-                var word = new WordDocumentServiceV4(_wordApplication);
+                var word = new WordDocumentServiceV5(_wordApplication);
                 int count = word.BeautifyActiveDocument();
                 MessageBox.Show(
                     count == 0 ? "Không tìm thấy đoạn văn nào để format." : $"Đã làm đẹp format cho {count} đoạn văn.",
@@ -188,7 +190,7 @@ namespace WordGeminiFormula.AddIn
             try
             {
                 EnsureConnected();
-                var word = new WordDocumentServiceV4(_wordApplication);
+                var word = new WordDocumentServiceV5(_wordApplication);
                 int count = word.NormalizeAllMarkedFormulas();
                 string failed = word.LastNormalizationFailureCount > 0
                     ? $" Có {word.LastNormalizationFailureCount} công thức chưa chuyển đổi được; chúng được giữ nguyên và tô vàng."
@@ -212,7 +214,7 @@ namespace WordGeminiFormula.AddIn
             try
             {
                 EnsureConnected();
-                new WordDocumentServiceV4(_wordApplication).NormalizeSelection();
+                new WordDocumentServiceV5(_wordApplication).NormalizeSelection();
             }
             catch (Exception ex)
             {
