@@ -208,7 +208,6 @@ namespace WordGeminiFormula.AddIn.Word
                 }
                 catch
                 {
-                    // Keep the original marker editable and make the failure obvious.
                     range.HighlightColorIndex = 7; // wdYellow
                     failed++;
                 }
@@ -295,7 +294,8 @@ namespace WordGeminiFormula.AddIn.Word
             ResetSelectionStyle(selection);
             int paragraphStart = (int)selection.Start;
             string prefix = string.IsNullOrWhiteSpace(block.number) ? "" : "Câu " + block.number.Trim() + ". ";
-            selection.TypeText(prefix + RenderInline(block.content));
+            string body = block.content != null && block.content.Count > 0 ? RenderInline(block.content) : (block.text ?? string.Empty);
+            selection.TypeText(prefix + body);
             int paragraphEnd = (int)selection.End;
             if (!string.IsNullOrEmpty(prefix))
             {
@@ -318,7 +318,7 @@ namespace WordGeminiFormula.AddIn.Word
         {
             dynamic document = _wordApplication.ActiveDocument;
             dynamic selection = _wordApplication.Selection;
-            int cols = 2;
+            const int cols = 2;
             int rows = (int)Math.Ceiling(choices.Count / 2.0);
             dynamic table = document.Tables.Add(selection.Range, rows, cols);
             table.Borders.Enable = 0;
@@ -326,15 +326,8 @@ namespace WordGeminiFormula.AddIn.Word
 
             for (int i = 0; i < choices.Count; i++)
             {
-                int row = (i % 2) + 1;
-                int col = (i / 2) + 1;
-                if (col > cols)
-                {
-                    // More than 4 choices: fall back to row-major placement.
-                    row = (i / cols) + 1;
-                    col = (i % cols) + 1;
-                }
-                if (row > rows) row = rows;
+                int row = (i / cols) + 1;
+                int col = (i % cols) + 1;
                 OcrChoice choice = choices[i];
                 string label = string.IsNullOrWhiteSpace(choice?.label) ? ((char)('A' + i)).ToString() : choice.label.Trim();
                 dynamic cell = table.Cell(row, col);
@@ -383,21 +376,35 @@ namespace WordGeminiFormula.AddIn.Word
         {
             if (parts == null) return string.Empty;
             var sb = new StringBuilder();
+            bool previousWasMath = false;
             foreach (OcrInline part in parts)
             {
                 if (part == null) continue;
-                if (string.Equals(part.type, "math", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(part.type, "formula", StringComparison.OrdinalIgnoreCase))
+                bool isMath = string.Equals(part.type, "math", StringComparison.OrdinalIgnoreCase) ||
+                              string.Equals(part.type, "formula", StringComparison.OrdinalIgnoreCase);
+                if (isMath)
                 {
+                    if (sb.Length > 0 && !char.IsWhiteSpace(sb[sb.Length - 1]) && "([{".IndexOf(sb[sb.Length - 1]) < 0)
+                        sb.Append(' ');
                     string source = !string.IsNullOrWhiteSpace(part.latex) ? part.latex : part.word_linear;
                     sb.Append(MathStart).Append(_repair.RepairLatex(source ?? string.Empty)).Append(MathEnd);
+                    previousWasMath = true;
                 }
                 else
                 {
-                    sb.Append(part.text ?? string.Empty);
+                    string text = part.text ?? string.Empty;
+                    if (previousWasMath && text.Length > 0 && !char.IsWhiteSpace(text[0]) && !IsNoLeadingSpacePunctuation(text[0]))
+                        sb.Append(' ');
+                    sb.Append(text);
+                    previousWasMath = false;
                 }
             }
             return sb.ToString();
+        }
+
+        private static bool IsNoLeadingSpacePunctuation(char c)
+        {
+            return c == '.' || c == ',' || c == ';' || c == ':' || c == '?' || c == '!' || c == ')' || c == ']' || c == '}';
         }
 
         private void InsertDifficultRegion(OcrBlock block, string sourceImagePath, bool preserve)
