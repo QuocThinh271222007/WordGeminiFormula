@@ -11,10 +11,52 @@ function Test-IsAdministrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-function Invoke-Reg([string[]]$Arguments) {
-    & "$env:SystemRoot\System32\reg.exe" @Arguments | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "reg.exe failed with exit code ${LASTEXITCODE}: $($Arguments -join ' ')"
+function Get-RegistryViews {
+    if ([Environment]::Is64BitOperatingSystem) {
+        return @(
+            [Microsoft.Win32.RegistryView]::Registry64,
+            [Microsoft.Win32.RegistryView]::Registry32
+        )
+    }
+    return @([Microsoft.Win32.RegistryView]::Registry32)
+}
+
+function Remove-HkcuSubKey([string]$SubKey) {
+    foreach ($view in Get-RegistryViews) {
+        $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+            [Microsoft.Win32.RegistryHive]::CurrentUser,
+            $view
+        )
+        try {
+            $baseKey.DeleteSubKeyTree($SubKey, $false)
+        }
+        finally {
+            $baseKey.Dispose()
+        }
+    }
+}
+
+function Set-WordAddinRegistry([string]$SubKey) {
+    foreach ($view in Get-RegistryViews) {
+        $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+            [Microsoft.Win32.RegistryHive]::CurrentUser,
+            $view
+        )
+        try {
+            $key = $baseKey.CreateSubKey($SubKey)
+            try {
+                $key.SetValue('FriendlyName', 'Word Gemini Formula', [Microsoft.Win32.RegistryValueKind]::String)
+                $key.SetValue('Description', 'Gemini OCR and native Word equation normalization', [Microsoft.Win32.RegistryValueKind]::String)
+                $key.SetValue('LoadBehavior', 3, [Microsoft.Win32.RegistryValueKind]::DWord)
+                $key.SetValue('CommandLineSafe', 0, [Microsoft.Win32.RegistryValueKind]::DWord)
+            }
+            finally {
+                $key.Dispose()
+            }
+        }
+        finally {
+            $baseKey.Dispose()
+        }
     }
 }
 
@@ -52,17 +94,11 @@ if (-not (Test-IsAdministrator)) {
 
 $clsid = '{7BA1B881-3DA4-4FBA-A25D-5F92141658EE}'
 $progId = 'WordGeminiFormula.AddIn'
-$officeAddinKey = "HKCU\Software\Microsoft\Office\Word\Addins\$progId"
+$officeAddinSubKey = "Software\Microsoft\Office\Word\Addins\$progId"
 
-# Clean legacy per-user COM registration created by V0.1.
-$legacyKeys = @(
-    "HKCU\Software\Classes\CLSID\$clsid",
-    "HKCU\Software\Classes\$progId"
-)
-foreach ($key in $legacyKeys) {
-    & "$env:SystemRoot\System32\reg.exe" delete $key /f /reg:64 2>$null | Out-Null
-    & "$env:SystemRoot\System32\reg.exe" delete $key /f /reg:32 2>$null | Out-Null
-}
+# Clean legacy per-user COM registration created by V0.1. Missing keys are OK.
+Remove-HkcuSubKey "Software\Classes\CLSID\$clsid"
+Remove-HkcuSubKey "Software\Classes\$progId"
 
 # Register the managed COM class in both registry views on 64-bit Windows so
 # either 32-bit or 64-bit Word can load the same AnyCPU .NET Framework assembly.
@@ -85,15 +121,8 @@ foreach ($regasm in $regasmPaths) {
     }
 }
 
-# Word discovers COM add-ins through this per-user key. Write both registry
-# views because Office may be installed as either 32-bit or 64-bit.
-$views = if ([Environment]::Is64BitOperatingSystem) { @('64', '32') } else { @('32') }
-foreach ($view in $views) {
-    Invoke-Reg @('add', $officeAddinKey, '/v', 'FriendlyName', '/t', 'REG_SZ', '/d', 'Word Gemini Formula', '/f', "/reg:$view")
-    Invoke-Reg @('add', $officeAddinKey, '/v', 'Description', '/t', 'REG_SZ', '/d', 'Gemini OCR and native Word equation normalization', '/f', "/reg:$view")
-    Invoke-Reg @('add', $officeAddinKey, '/v', 'LoadBehavior', '/t', 'REG_DWORD', '/d', '3', '/f', "/reg:$view")
-    Invoke-Reg @('add', $officeAddinKey, '/v', 'CommandLineSafe', '/t', 'REG_DWORD', '/d', '0', '/f', "/reg:$view")
-}
+# Word discovery remains per-user; write both registry views for 32/64-bit Office.
+Set-WordAddinRegistry $officeAddinSubKey
 
 Write-Host 'Word Gemini Formula COM registration completed successfully.' -ForegroundColor Green
 Write-Host "DLL: $DllPath"
