@@ -28,9 +28,6 @@ namespace WordGeminiFormula.AddIn.Gemini
 
         private static HttpClient CreateHttpClient()
         {
-            // Per-request CancellationTokenSource instances below own timeout policy.
-            // A global HttpClient timeout used to surface only the unhelpful
-            // "A task was canceled" message after 120 seconds.
             return new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
         }
 
@@ -70,10 +67,10 @@ namespace WordGeminiFormula.AddIn.Gemini
                 generationConfig = new
                 {
                     responseMimeType = "application/json",
-                    // OCR/layout extraction is latency-sensitive and does not need the
-                    // default medium reasoning effort of Gemini 3.7 Flash.
                     thinkingConfig = new { thinkingLevel = "low" },
-                    maxOutputTokens = 16384
+                    // MathML is intentionally verbose. Keep enough headroom for a full
+                    // exam page without truncating the tail of structured JSON.
+                    maxOutputTokens = 32768
                 }
             };
 
@@ -99,7 +96,7 @@ namespace WordGeminiFormula.AddIn.Gemini
             }
 
             if (doc?.blocks == null)
-                throw new InvalidOperationException("Gemini trả về JSON không đúng schema OCR V0.2.");
+                throw new InvalidOperationException("Gemini trả về JSON không đúng schema OCR V0.3.");
 
             NormalizeDocument(doc);
             return doc;
@@ -167,6 +164,7 @@ namespace WordGeminiFormula.AddIn.Gemini
                 block.number = block.number?.Trim();
                 block.latex = block.latex?.Trim();
                 block.word_linear = block.word_linear?.Trim();
+                block.mathml = block.mathml?.Trim();
                 if (block.content == null) block.content = new List<OcrInline>();
                 if (block.choices == null) block.choices = new List<OcrChoice>();
 
@@ -176,6 +174,7 @@ namespace WordGeminiFormula.AddIn.Gemini
                     part.text = part.text ?? string.Empty;
                     part.latex = part.latex?.Trim();
                     part.word_linear = part.word_linear?.Trim();
+                    part.mathml = part.mathml?.Trim();
                 }
 
                 foreach (var choice in block.choices.Where(c => c != null))
@@ -188,6 +187,7 @@ namespace WordGeminiFormula.AddIn.Gemini
                         part.text = part.text ?? string.Empty;
                         part.latex = part.latex?.Trim();
                         part.word_linear = part.word_linear?.Trim();
+                        part.mathml = part.mathml?.Trim();
                     }
                 }
             }
@@ -359,7 +359,6 @@ CORE REQUIREMENTS
 - Recognize layout semantics instead of emitting every visual line as an unrelated paragraph.
 - Keep mathematical expressions as math fragments, not flattened prose.
 - Preserve spaces at the boundaries of inline text fragments so prose and formulas do not run together.
-- Use standard mathematical notation when the image is visually unambiguous: f(x), g(x), u_n, u_1, P(A), vectors, coordinates, intervals, derivatives, integrals, matrices, cases, logarithm bases, etc.
 - Every math fragment must be complete and self-contained. Do not split one visible formula into separate math fragments.
 - Do not emit square-bracket MATH control markers in any text field; those markers belong to the Word renderer.
 - If a symbol is genuinely unclear, keep the most literal reading and lower confidence; do not guess a different problem.
@@ -385,14 +384,26 @@ RETURN JSON ONLY. Use this schema:
       ""number"": ""1"",
       ""content"": [
         { ""type"": ""text"", ""text"": ""Cho cấp số cộng "" },
-        { ""type"": ""math"", ""latex"": ""u_n"", ""word_linear"": ""u_n"", ""confidence"": 1.0 },
+        {
+          ""type"": ""math"",
+          ""latex"": ""u_n"",
+          ""word_linear"": ""u_n"",
+          ""mathml"": ""<math xmlns='http://www.w3.org/1998/Math/MathML'><msub><mi>u</mi><mi>n</mi></msub></math>"",
+          ""confidence"": 1.0
+        },
         { ""type"": ""text"", ""text"": "" có "" }
       ],
       ""choices"": [
         { ""label"": ""A"", ""content"": [{ ""type"": ""text"", ""text"": ""4."" }] }
       ]
     },
-    { ""type"": ""formula"", ""latex"": ""..."", ""word_linear"": ""..."", ""display"": true },
+    {
+      ""type"": ""formula"",
+      ""latex"": ""..."",
+      ""word_linear"": ""..."",
+      ""mathml"": ""<math xmlns='http://www.w3.org/1998/Math/MathML'>...</math>"",
+      ""display"": true
+    },
     {
       ""type"": ""figure"",
       ""text"": ""short description only"",
@@ -419,12 +430,26 @@ BLOCK RULES
 7. section is for headings such as PHẦN I.
 8. footer is for page number / exam-code footer.
 
-MATH RULES
-- latex must be syntactically valid LaTeX for the exact visible expression.
-- word_linear must be equivalent Microsoft Word UnicodeMath/Math AutoCorrect linear input.
-- Preserve superscripts, subscripts, fractions, radicals, integrals, sums, limits, vectors, matrices, systems/cases, Greek symbols, intervals, sets and accents.
-- Prefer explicit grouping. Examples: f(x), g'(x)=x^2, \\mathbb{R}, \\overrightarrow{AB}, A(1;5;1), \\log_3(x-1), \\begin{cases}...\\end{cases}.
-- Do not remove parentheses from function notation or coordinates.
+MATH OUTPUT CONTRACT — IMPORTANT
+For EVERY part whose type is math/formula, return all three representations:
+- latex: valid LaTeX matching the image exactly.
+- word_linear: equivalent Word linear math, used only as a compatibility fallback.
+- mathml: valid Presentation MathML 3 with root exactly <math xmlns='http://www.w3.org/1998/Math/MathML'>...</math>.
+MathML is the primary structure-preserving representation and MUST NOT be omitted when the expression is readable.
+Do not include <annotation>, <semantics>, external entities, DTDs, scripts or links in mathml.
+
+MATHML STRUCTURE RULES
+- Use structural MathML elements rather than flattening visual math into text: mfrac, msqrt/mroot, msub, msup, msubsup, mover/munder/munderover, mfenced or explicit mo delimiters, mtable/mtr/mtd for matrices and systems, mi/mn/mo/mtext as appropriate.
+- Preserve exact grouping, parentheses, braces, absolute values, norms, accents, arrows, primes, degrees, Greek symbols, derivatives, limits, sums, products, integrals, binomials, matrices, determinants, piecewise/cases, coordinates, intervals, sets, probability notation and function application.
+- Decimal comma is part of the number. Example 0,5 MUST be one token <mn>0,5</mn>; never model the comma as a separate delimiter/operator.
+- Function/probability parentheses are literal visible delimiters. P(A)=0,5 should be structurally equivalent to:
+  <math xmlns='http://www.w3.org/1998/Math/MathML'><mrow><mi>P</mi><mo>(</mo><mi>A</mi><mo>)</mo><mo>=</mo><mn>0,5</mn></mrow></math>
+- A system/cases expression must use an mtable with one row per branch, preceded by a visible left brace. Example:
+  <math xmlns='http://www.w3.org/1998/Math/MathML'><mrow><mo>{</mo><mtable><mtr><mtd><mrow><mi>x</mi><mo>+</mo><mi>y</mi><mo>-</mo><mn>3</mn><mo>&lt;</mo><mn>0</mn></mrow></mtd></mtr><mtr><mtd><mrow><mi>x</mi><mo>-</mo><mi>y</mi><mo>+</mo><mn>1</mn><mo>&gt;</mo><mn>0</mn></mrow></mtd></mtr></mtable></mrow></math>
+- Do not let a subscript/superscript absorb a following function argument: f_2(x) means an msub for f and 2, followed by separate parentheses containing x.
+- Do not change Vietnamese decimal commas to decimal points.
+- Do not remove parentheses from P(A), P(AB), f(x), coordinates or intervals.
+- When a formula is readable, prefer correct MathML structure over clever Word-linear syntax.
 
 DIFFICULT VISUAL REGIONS
 - Do NOT flatten geometry diagrams, graphs, variation tables, or visually structured tables into unreliable prose.
