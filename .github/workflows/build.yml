@@ -15,21 +15,38 @@ jobs:
       - name: Restore and build
         shell: pwsh
         run: msbuild WordGeminiFormula.sln /t:Restore,Build /p:Configuration=Release /p:Platform="Any CPU"
-      - name: COM activation smoke test
+      - name: COM registration diagnostics
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $dll = (Resolve-Path 'src/WordGeminiFormula.AddIn/bin/Release/net48/WordGeminiFormula.AddIn.dll').Path
+          $clsid = '{7BA1B881-3DA4-4FBA-A25D-5F92141658EE}'
+          $manualFailed = $false
+
+          # Prove the assembly itself can be loaded by the CLR.
+          $asm = [Reflection.Assembly]::LoadFrom($dll)
+          $managed = $asm.GetType('WordGeminiFormula.AddIn.Connect', $true)
+          $instance = [Activator]::CreateInstance($managed)
+          if ([string]::IsNullOrWhiteSpace($instance.GetCustomUI('Microsoft.Word.Document'))) {
+            throw 'Managed activation failed.'
+          }
+          Write-Host 'Managed assembly activation passed.' -ForegroundColor Green
+
+          # Test the per-user registration used by the installer.
           & .\scripts\install.ps1 -DllPath $dll
           try {
             $type = [Type]::GetTypeFromProgID('WordGeminiFormula.AddIn', $true)
             $addin = [Activator]::CreateInstance($type)
-            if ($null -eq $addin) { throw 'COM activation returned null.' }
             $xml = $addin.GetCustomUI('Microsoft.Word.Document')
             if ([string]::IsNullOrWhiteSpace($xml) -or $xml -notmatch '<customUI') {
               throw 'GetCustomUI did not return Ribbon XML.'
             }
-            Write-Host 'COM activation and GetCustomUI smoke test passed.' -ForegroundColor Green
+            Write-Host 'Installer COM activation passed.' -ForegroundColor Green
+          }
+          catch {
+            $manualFailed = $true
+            Write-Host ('Installer COM activation FAILED: ' + $_.Exception.Message) -ForegroundColor Yellow
+            & reg.exe query "HKCU\Software\Classes\CLSID\$clsid" /s
           }
           finally {
             if ($null -ne $addin -and [Runtime.InteropServices.Marshal]::IsComObject($addin)) {
@@ -37,6 +54,34 @@ jobs:
             }
             & .\scripts\uninstall.ps1
           }
+
+          # Control: register the same DLL using the .NET Framework registration tool.
+          $regasm = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\RegAsm.exe"
+          if (-not (Test-Path $regasm)) {
+            $regasm = "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\RegAsm.exe"
+          }
+          if (-not (Test-Path $regasm)) { throw 'RegAsm.exe not found.' }
+
+          & $regasm $dll /nologo /codebase
+          if ($LASTEXITCODE -ne 0) { throw "RegAsm registration failed: $LASTEXITCODE" }
+          try {
+            $type2 = [Type]::GetTypeFromProgID('WordGeminiFormula.AddIn', $true)
+            $addin2 = [Activator]::CreateInstance($type2)
+            $xml2 = $addin2.GetCustomUI('Microsoft.Word.Document')
+            if ([string]::IsNullOrWhiteSpace($xml2) -or $xml2 -notmatch '<customUI') {
+              throw 'RegAsm GetCustomUI did not return Ribbon XML.'
+            }
+            Write-Host 'RegAsm COM activation passed.' -ForegroundColor Green
+            & reg.exe query "HKCR\CLSID\$clsid" /s
+          }
+          finally {
+            if ($null -ne $addin2 -and [Runtime.InteropServices.Marshal]::IsComObject($addin2)) {
+              [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($addin2)
+            }
+            & $regasm $dll /nologo /unregister | Out-Null
+          }
+
+          if ($manualFailed) { throw 'Installer registration differs from working RegAsm registration.' }
       - name: Stage package
         shell: pwsh
         run: |
